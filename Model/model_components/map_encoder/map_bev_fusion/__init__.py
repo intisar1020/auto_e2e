@@ -1,9 +1,11 @@
 from .residual_fusion import ResidualMapFusion
 from .cross_attention_fusion import MapCrossAttentionFusion
+from .deformable_cross_attention_fusion import MapDeformableCrossAttentionFusion
 
 MAP_FUSION_REGISTRY = {
     "residual": ResidualMapFusion,
     "cross_attn": MapCrossAttentionFusion,
+    "deformable": MapDeformableCrossAttentionFusion,
 }
 
 
