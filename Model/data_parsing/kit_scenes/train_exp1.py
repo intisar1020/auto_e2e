@@ -74,8 +74,44 @@ def _tensors(s, device):
     return v, eg, vh, tg, cp, mc, rm, mv, rv
 
 
+def _augment_image(v: torch.Tensor) -> torch.Tensor:
+    """Photometric augmentation on (1, V, 3, H, W) float tiles.
+
+    Color jitter + gaussian noise + random erasing. No geometric transforms:
+    flipping/cropping would break the fixed camera intrinsics and the
+    calibrated BEV projection.
+    """
+    if not (torch.rand(1).item() < 0.9):
+        return v
+    # Shared color jitter across all V cameras (same lighting change).
+    b = 1.0 + torch.rand(1).item() * 0.2 - 0.1      # brightness ±0.1
+    c = 1.0 + torch.rand(1).item() * 0.4 - 0.2      # contrast ±0.2
+    s = 1.0 + torch.rand(1).item() * 0.4 - 0.2      # saturation ±0.2
+    v = v * b
+    mean = v.mean(dim=(3, 4), keepdim=True)
+    v = (v - mean) * c + mean
+    gray = v.mean(dim=2, keepdim=True)
+    v = (v - gray) * s + gray
+    # Gaussian noise.
+    if torch.rand(1).item() < 0.5:
+        v = v + torch.randn_like(v) * 0.02
+    # Random erasing on one random camera view.
+    if torch.rand(1).item() < 0.3:
+        V = v.shape[1]
+        cam = torch.randint(V, (1,)).item()
+        _, _, _, h, w = v.shape
+        rh = int(h * (0.05 + 0.15 * torch.rand(1).item()))
+        rw = int(w * (0.05 + 0.15 * torch.rand(1).item()))
+        y0 = torch.randint(h - rh, (1,)).item()
+        x0 = torch.randint(w - rw, (1,)).item()
+        v[0, cam, y0:y0 + rh, x0:x0 + rw] = 0.5
+    return v.clamp(0.0, 1.0)
+
+
 def _forward(model, s, device, mode="train"):
     v, eg, vh, tg, cp, mc, rm, mv, rv = _tensors(s, device)
+    if mode == "train":
+        v = _augment_image(v)
     with torch.amp.autocast("cuda"):
         out = model(v, mc, vh, eg, route_mask=rm, map_valid=mv, route_valid=rv,
                     projection=PinholeProjection(cp), geometry_type="pinhole",
