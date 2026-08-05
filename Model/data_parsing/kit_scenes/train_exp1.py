@@ -45,8 +45,10 @@ PLOT_EVERY = 200
 
 def _load_manifest():
     m = json.loads((BASE / "manifest.json").read_text())
-    train = [e["sid"] for e in m["tars"] if e["role"] == "train"]
-    val = [e["sid"] for e in m["tars"] if e["role"] == "val"]
+    train = [e["sid"] for e in m["tars"]
+             if e["role"] == "train" and e.get("status") == "done"]
+    val = [e["sid"] for e in m["tars"]
+           if e["role"] == "val" and e.get("status") == "done"]
     return train, val
 
 
@@ -108,17 +110,6 @@ def _augment_image(v: torch.Tensor) -> torch.Tensor:
     return v.clamp(0.0, 1.0)
 
 
-def _forward(model, s, device, mode="train"):
-    v, eg, vh, tg, cp, mc, rm, mv, rv = _tensors(s, device)
-    if mode == "train":
-        v = _augment_image(v)
-    with torch.amp.autocast("cuda"):
-        out = model(v, mc, vh, eg, route_mask=rm, map_valid=mv, route_valid=rv,
-                    projection=PinholeProjection(cp), geometry_type="pinhole",
-                    trajectory_target=tg, mode=mode)
-    return out, tg
-
-
 def _ade_fde(pred_np, tgt_np):
     px = integrate_trajectory(pred_np[0::2], pred_np[1::2], v0=10.0)
     tx = integrate_trajectory(tgt_np[0::2], tgt_np[1::2], v0=10.0)
@@ -148,7 +139,12 @@ def _validate(model, val_ds, device, lfn):
     with torch.no_grad():
         for i in range(len(val_ds)):
             s = val_ds[i]
-            out, tg = _forward(model, s, device, mode="train")
+            v, eg, vh, tg, cp, mc, rm, mv, rv = _tensors(s, device)
+            with torch.amp.autocast("cuda"):
+                out = model(v, mc, vh, eg, route_mask=rm, map_valid=mv,
+                            route_valid=rv, projection=PinholeProjection(cp),
+                            geometry_type="pinhole", trajectory_target=tg,
+                            mode="train")
             tot_loss += float(lfn(out, tg))
             ade, fde, _, _ = _ade_fde(out.cpu().numpy()[0], tg.cpu().numpy()[0])
             tot_ade += ade
@@ -164,6 +160,10 @@ def main():
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--grad-accum", type=int, default=4)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--resume", action="store_true",
+                    help="resume from checkpoints/best.pt")
+    ap.add_argument("--no-augment", action="store_true",
+                    help="disable image augmentation")
     args = ap.parse_args()
 
     device = args.device if torch.cuda.is_available() else "cpu"
@@ -172,23 +172,40 @@ def main():
     print(f"train: {n_train} samples / {len(train_ids)} tars | "
           f"val: {len(val_ds)} samples / {len(val_ids)} tars")
 
-    model = AutoE2E(enable_reasoning=False, map_context_channels=14,
-                    route_channels=2, map_fusion_mode="deformable").to(device)
-    lfn = TrajectoryImitationLoss(loss_type="smooth_l1", temporal_decay=0.95,
-                                  signal_scales=(0.778, 0.0350)).to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
-    n_steps = n_train * args.epochs
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=n_steps, eta_min=1e-6)
-
     ckpt_dir = BASE / "checkpoints"
     traj_dir = BASE / "trajectories"
     ckpt_dir.mkdir(exist_ok=True)
     traj_dir.mkdir(exist_ok=True)
 
+    model = AutoE2E(enable_reasoning=False, map_context_channels=14,
+                    route_channels=2, map_fusion_mode="deformable").to(device)
+    if args.resume and (ckpt_dir / "best.pt").is_file():
+        model.load_state_dict(torch.load(ckpt_dir / "best.pt",
+                                         map_location=device))
+        print(f"resumed from {ckpt_dir}/best.pt")
+    lfn = TrajectoryImitationLoss(loss_type="smooth_l1", temporal_decay=0.95,
+                                  signal_scales=(0.778, 0.0350)).to(device)
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
+    n_steps = n_train * args.epochs // args.grad_accum
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=n_steps, eta_min=1e-6)
+
     history = {"train_loss": [], "val": [], "iter": []}
     best_ade = float("inf")
     t_start = time.time()
     step = 0
+
+    def _fwd(s, mode="train"):
+        if args.no_augment and mode == "train":
+            v, eg, vh, tg, cp, mc, rm, mv, rv = _tensors(s, device)
+        else:
+            v, eg, vh, tg, cp, mc, rm, mv, rv = _tensors(s, device)
+            if mode == "train":
+                v = _augment_image(v)
+        with torch.amp.autocast("cuda"):
+            out = model(v, mc, vh, eg, route_mask=rm, map_valid=mv,
+                        route_valid=rv, projection=PinholeProjection(cp),
+                        geometry_type="pinhole", trajectory_target=tg, mode=mode)
+        return out, tg
 
     for epoch in range(args.epochs):
         print(f"\n=== EPOCH {epoch + 1}/{args.epochs} ===")
@@ -196,7 +213,7 @@ def main():
         opt.zero_grad(set_to_none=True)
         for i in range(n_train):
             s = train_ds[i]
-            out, tg = _forward(model, s, device, mode="train")
+            out, tg = _fwd(s, mode="train")
             loss = lfn(out, tg) / args.grad_accum
             loss.backward()
             if (i + 1) % args.grad_accum == 0:
