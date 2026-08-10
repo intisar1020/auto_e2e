@@ -34,3 +34,4 @@ Platform/infra/environments/*/secrets.auto.tfvars
 **/checkpoints_backup/
 **/*.mp4
 **/exp-1-subset/
+**/exp-2-subset/

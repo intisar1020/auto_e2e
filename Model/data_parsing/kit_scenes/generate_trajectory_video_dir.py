@@ -1,16 +1,20 @@
-"""Generate trajectory prediction video with real calibration + ego history.
+"""Generate trajectory prediction video from an already-extracted scene dir.
+
+Adapted from generate_trajectory_video.py:
+- Takes an extracted scene directory (data/train/<sid>) instead of a .tar.
+- Defaults to the exp-2-subset best checkpoint.
+- route_valid=True (all 16 navigation channels live), matching exp-2 training.
 
 Usage:
   cd Model/data_parsing/kit_scenes
-  python generate_trajectory_video.py \
-    --checkpoint checkpoints/best.pt \
-    --tar data/73197a6d-fd55-2fd2-4a47-ddb3ff3b7db7.tar \
-    --output trajectory_video.mp4
+  python generate_trajectory_video_dir.py \
+    --scene-dir exp-1-subset/data/train/<sid> \
+    --output exp-2-subset/trajectory_video.mp4
 """
 
 from __future__ import annotations
 
-import argparse, json, os, shutil, sys, tarfile
+import argparse, json, os, sys
 from pathlib import Path
 
 import cv2, matplotlib, numpy as np, torch
@@ -18,6 +22,8 @@ matplotlib.use("Agg")
 from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 import matplotlib.pyplot as plt
 from PIL import Image
+from kitscenes.poses import load_ego_poses
+from kitscenes.sensors import SensorDataLoader
 
 _MODEL_DIR = Path(__file__).parent.parent.parent.resolve()
 sys.path.insert(0, str(_MODEL_DIR))
@@ -29,16 +35,16 @@ from data_parsing.kit_scenes.camera import (
 from data_parsing.kit_scenes.egomotion import pose_yaws, poses_to_arrays
 from data_parsing.kit_scenes.map import generate_bev_map_tile
 from data_parsing.kit_scenes.navigation import build_scene_navigation
-from data_parsing.kit_scenes.stream_debug_test import (
-    _extract_map_to_tempdir, _parse_poses_from_tar, _quaternion_to_yaw,
-)
 from evaluation.metrics import integrate_trajectory
 from model_components.auto_e2e import AutoE2E
 from model_components.view_fusion.projection import PinholeProjection
-from kitscenes.poses import load_ego_poses
-from kitscenes.sensors import SensorDataLoader
 
+# Display labels matching CAMERA_NAMES order (7 views):
+# ["camera_base_front_center", "camera_ring_front", "camera_ring_front_left",
+#  "camera_ring_front_right", "camera_ring_rear", "camera_ring_rear_left", "camera_ring_rear_right"]
 _SHORT = ["front_ctr", "front", "front_L", "front_R", "rear", "rear_L", "rear_R"]
+
+EXP2_BASE = Path(__file__).parent / "exp-2-subset"
 
 
 def _load_camera_frame_scene_dir(loader: SensorDataLoader, frame_idx: int) -> torch.Tensor:
@@ -55,6 +61,7 @@ def _load_camera_calibration(loader: SensorDataLoader):
     """Load front-center camera intrinsics, camera-to-reference extrinsics, and resolution."""
     calib = loader.get_camera_calibration("camera_base_front_center")
     K_front = calib.intrinsic.copy().astype(np.float64)
+    # calib.extrinsic is T_cam_to_ref; inverse is T_ref_to_cam (top_lidar_flu -> camera)
     T_ref_to_cam = np.linalg.inv(calib.extrinsic)
     orig_w, orig_h = calib.image_size
     return K_front, T_ref_to_cam, int(orig_w), int(orig_h)
@@ -66,7 +73,12 @@ def _project_trajectory_to_camera(
     K: np.ndarray,
     T_ref_to_cam: np.ndarray,
 ):
-    """Project ego-frame XY waypoints (top_lidar_flu) onto front camera pixels."""
+    """Project ego-frame XY waypoints (top_lidar_flu) onto front camera pixels.
+
+    Points in ego frame (top_lidar_flu): +X = forward, +Y = left, ground Z = -2.1m.
+    T_ref_to_cam transforms top_lidar_flu -> camera 3D space.
+    Returns (pred_uv, gt_uv, pred_depth, gt_depth).
+    """
     Z_GROUND = -2.1
 
     def _project(points_ego_xy):
@@ -79,7 +91,7 @@ def _project_trajectory_to_camera(
         pts_ego[:, 2] = Z_GROUND
         pts_ego[:, 3] = 1.0
 
-        pts_cam = (T_ref_to_cam @ pts_ego.T).T
+        pts_cam = (T_ref_to_cam @ pts_ego.T).T  # (N, 4)
         depths = pts_cam[:, 2]
 
         uv = (K @ pts_cam[:, :3].T).T
@@ -130,42 +142,38 @@ def _draw_path_ribbon(ax, uv_u, uv_v, depths, facecolor, linecolor, alpha=0.50,
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, required=True)
-    parser.add_argument("--tar", type=str, required=True)
-    parser.add_argument("--output", type=str, default="trajectory_video.mp4")
+    parser.add_argument("--checkpoint", type=str,
+                        default=str(EXP2_BASE / "checkpoints" / "best.pt"))
+    parser.add_argument("--scene-dir", type=str, required=True)
+    parser.add_argument("--output", type=str,
+                        default=str(EXP2_BASE / "trajectory_video.mp4"))
     parser.add_argument("--fps", type=int, default=3)
     parser.add_argument("--max-frames", type=int, default=0)
-    parser.add_argument("--horizon", type=float, default=6.4)
+    parser.add_argument("--horizon", type=float, default=6.4,
+                        help="prediction horizon in seconds (default 6.4)")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
+
+    scene_dir = Path(args.scene_dir).resolve()
+    scene_id = scene_dir.name
 
     print("Loading model...")
     model = AutoE2E(
         is_pretrained=False, enable_world_model=False, enable_reasoning=False,
         map_context_channels=14, route_channels=2, map_fusion_mode="deformable",
     )
-    model.load_state_dict(torch.load(args.checkpoint, map_location=device, weights_only=True))
+    model.load_state_dict(torch.load(args.checkpoint, map_location=device,
+                                     weights_only=True))
     model.to(device).eval()
 
-    print(f"Extracting {args.tar}...")
-    tar = tarfile.open(args.tar)
-    scene_id = Path(args.tar).stem
-    scene_dir = _extract_map_to_tempdir(tar, scene_id)
-
-    print("  Extracting full scene...")
-    tar.extractall(path=scene_dir.parent)
-    tar.close()
-    full_scene = scene_dir.parent / scene_id
-
-    loader = SensorDataLoader(full_scene)
-    poses = tuple(load_ego_poses(full_scene))
-
+    loader = SensorDataLoader(scene_dir)
+    poses = tuple(load_ego_poses(scene_dir))
     n_poses = len(poses)
     if args.max_frames > 0:
         n_poses = min(n_poses, args.max_frames)
-    print(f"  Scene: {scene_id[:12]}... — {n_poses} poses")
+    print(f"Scene: {scene_id[:12]}... — {n_poses} poses")
 
     print("Loading real camera calibration...")
     cam_proj = compute_camera_projection_matrices(
@@ -180,7 +188,7 @@ def main():
 
     scene_nav = build_scene_navigation(
         scene_id=scene_id,
-        scene_path=full_scene,
+        scene_path=scene_dir,
         positions_enu_m=positions_local,
         yaws_rad=yaws,
         timestamps_ns=timestamps_ns,
@@ -256,7 +264,7 @@ def main():
             pred_xy_viz, gt_xy_viz, K_front, T_ref_to_cam,
         )
         bev = generate_bev_map_tile(
-            scene_path=full_scene, ego_x=ego_x, ego_y=ego_y, ego_yaw=ego_yaw,
+            scene_path=scene_dir, ego_x=ego_x, ego_y=ego_y, ego_yaw=ego_yaw,
             canvas_size=500, radius_meters=80.0,
         )
         if bev is None:
@@ -268,16 +276,20 @@ def main():
 
         fig = plt.figure(figsize=(19.2, 10.8), dpi=100, facecolor="black")
 
-        gs_hero = GridSpec(1, 1, figure=fig, left=0.01, right=0.63, top=0.97, bottom=0.03)
+        # ---- Large front-center hero camera with waypoint overlay ----
+        gs_hero = GridSpec(1, 1, figure=fig, left=0.01, right=0.63, top=0.97,
+                           bottom=0.03)
         ax_hero = fig.add_subplot(gs_hero[0])
         ax_hero.imshow(front_img)
-        ax_hero.set_title("FRONT CENTER — blue=Pred  red=GT", fontsize=13, color="white")
+        ax_hero.set_title("FRONT CENTER — blue=Pred  red=GT", fontsize=13,
+                          color="white")
         ax_hero.axis("off")
 
         gu = gt_uv[:, 0] * scale_uv
         gv = gt_uv[:, 1] * scale_uv
         _draw_path_ribbon(ax_hero, gu, gv, gt_depth, facecolor="#dc2626",
-                          linecolor="#ff4444", alpha=0.55, zorder=3, endpoint_marker=False)
+                          linecolor="#ff4444", alpha=0.55, zorder=3,
+                          endpoint_marker=False)
 
         pu = pred_uv[:, 0] * scale_uv
         pv = pred_uv[:, 1] * scale_uv
@@ -290,6 +302,7 @@ def main():
             Line2D([0],[0], color="#ff4444", lw=3, label="GT"),
         ], loc="lower left", fontsize=8, facecolor="black", labelcolor="white")
 
+        # ---- Right column: BEV (top) + mini surround cameras (bottom) ----
         gs_right = GridSpec(2, 1, figure=fig, left=0.66, right=0.99, top=0.97,
                             bottom=0.03, hspace=0.12)
 
@@ -298,6 +311,7 @@ def main():
         s = 500.0 / 160.0; cx, cy = 250.0, 250.0
         ade = float(np.linalg.norm(pred_xy_viz[:, :2] - gt_xy_viz, axis=1).mean()) if min_len > 0 else 0.0
 
+        # Note: map.py maps +X_ego (fwd) -> row = cy - x*s, +Y_ego (left) -> col = cx - y*s
         ax_bev.plot(cx - pred_xy_viz[:, 1] * s, cy - pred_xy_viz[:, 0] * s, "b-", lw=2.5,
                     label=f"Pred (ADE={ade:.2f}m)")
         ax_bev.plot(cx - gt_xy_viz[:, 1] * s, cy - gt_xy_viz[:, 0] * s, "r-", lw=2.5,
@@ -307,14 +321,17 @@ def main():
                            c="blue", marker="x", s=80, zorder=10)
             ax_bev.scatter(cx - gt_xy_viz[-1, 1] * s, cy - gt_xy_viz[-1, 0] * s,
                            c="red", marker="x", s=80, zorder=10)
-        ax_bev.scatter(cx, cy, c="white", marker="^", s=110, zorder=15, edgecolors="black")
+        ax_bev.scatter(cx, cy, c="white", marker="^", s=110, zorder=15,
+                       edgecolors="black")
         ax_bev.set_title(f"BEV  F{fi+1}/{n_poses}  Speed: {v0:.1f} m/s", fontsize=10, color="white")
-        ax_bev.legend(loc="upper left", fontsize=7, facecolor="black", labelcolor="white")
+        ax_bev.legend(loc="upper left", fontsize=7, facecolor="black",
+                      labelcolor="white")
         ax_bev.axis("off")
 
+        # Surround mini views: indices 1..6 corresponding to CAMERA_NAMES[1..6]
         gs_mini = GridSpecFromSubplotSpec(2, 3, subplot_spec=gs_right[1],
                                            wspace=0.05, hspace=0.10)
-        mini_views = [1, 2, 3, 4, 5, 6]
+        mini_views = [1, 2, 3, 4, 5, 6]  # skip index 0 (front-center)
         for i, idx in enumerate(mini_views):
             ax = fig.add_subplot(gs_mini[i // 3, i % 3])
             ax.imshow(cam_np[idx].transpose(1, 2, 0))
@@ -333,10 +350,9 @@ def main():
             print(f"  Frame {fi}/{n_poses}")
 
     writer.release()
-    shutil.rmtree(scene_dir.parent, ignore_errors=True)
-
     sz = os.path.getsize(args.output) / 1e6
-    print(f"\nSaved: {args.output} ({sz:.1f} MB, {n_poses} frames, {n_poses/args.fps:.0f}s)")
+    print(f"\nSaved: {args.output} ({sz:.1f} MB, {n_poses} frames, "
+          f"{n_poses/args.fps:.0f}s)")
 
 
 if __name__ == "__main__":

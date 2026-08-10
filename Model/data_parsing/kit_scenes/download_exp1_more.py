@@ -15,10 +15,16 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import socket
 import sys
 import tarfile
 import tempfile
 import time
+
+# HfFileSystem's HTTP reads can hang forever on a stalled connection (we saw
+# CLOSE-WAIT sockets with no progress). Bound each socket so a dead peer
+# surfaces as an exception the retry loop can recover from.
+socket.setdefaulttimeout(60)
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -42,28 +48,34 @@ def download_one(sid: str) -> dict:
     dest = BASE / "data" / "train" / sid
     if dest.is_dir():
         return {"sid": sid, "status": "done", "samples": -1, "note": "already-extracted"}
-    fs = _fs()
     p = f"datasets/KIT-MRT/KITScenes-Multimodal/data/train/{sid}.tar"
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.parent / f".{sid}.tar.part"
     t0 = time.time()
-    try:
-        with fs.open(p, "rb") as fh, open(tmp, "wb") as out:
-            while True:
-                chunk = fh.read(CHUNK)
-                if not chunk:
-                    break
-                out.write(chunk)
-        with tarfile.open(tmp) as tar:
-            td = Path(tempfile.mkdtemp(prefix="ks_"))
-            tar.extractall(path=td)
-            (td / sid).rename(dest)
-            shutil.rmtree(td, ignore_errors=True)
-    except Exception as e:
-        tmp.unlink(missing_ok=True)
-        return {"sid": sid, "status": "error", "samples": -1, "note": str(e)[:120]}
-    finally:
-        tmp.unlink(missing_ok=True)
+    last_err = "timeout"
+    for attempt in range(3):
+        try:
+            fs = _fs()
+            with fs.open(p, "rb") as fh, open(tmp, "wb") as out:
+                while True:
+                    chunk = fh.read(CHUNK)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+            with tarfile.open(tmp) as tar:
+                td = Path(tempfile.mkdtemp(prefix="ks_"))
+                tar.extractall(path=td)
+                (td / sid).rename(dest)
+                shutil.rmtree(td, ignore_errors=True)
+            break
+        except Exception as e:
+            last_err = str(e)[:120]
+            tmp.unlink(missing_ok=True)
+            print(f"    retry {sid[:12]} ({attempt+1}/3): {last_err}", flush=True)
+            time.sleep(5)
+    else:
+        return {"sid": sid, "status": "error", "samples": -1, "note": last_err}
+    tmp.unlink(missing_ok=True)
     try:
         ds = KitScenesDataset(data_root=str(BASE / "data"), split="train",
                               include_navigation=True, scene_ids=[sid])
