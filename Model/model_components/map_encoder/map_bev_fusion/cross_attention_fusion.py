@@ -61,10 +61,19 @@ class MapCrossAttentionFusion(nn.Module):
         """
         B, C, H, W = image_bev.shape
 
-        # PyTorch 2.x uses flash attention / memory-efficient SDPA backends
-        # which handle large token counts at O(N) memory, not O(N²).
-        # The old guard is relaxed; if a particular GPU/backend still OOMs,
-        # fall back to map_fusion_mode='residual'.
+        # Dense cross-attention is O((H*W)^2). At the production BEV grid
+        # (450x300 = 135k tokens) the score matrix is ~1e11 elems → instant OOM.
+        # This fusion mode is only viable at small grids (tests use 8x8); guard
+        # loudly rather than let it OOM mid-run. Use map_fusion_mode="residual"
+        # (the default) at production resolution.
+        n_tokens = H * W
+        if n_tokens > 4096:
+            raise ValueError(
+                f"cross_attention map fusion is O(N^2) and infeasible at "
+                f"{H}x{W}={n_tokens} tokens (score matrix ~{n_tokens**2:.1e} "
+                f"elems → OOM). Use map_fusion_mode='residual' at this BEV "
+                f"resolution, or downsample the grid before this fusion."
+            )
 
         # Flatten spatial dims: (B, H*W, C)
         q = image_bev.permute(0, 2, 3, 1).reshape(B, H * W, C)
