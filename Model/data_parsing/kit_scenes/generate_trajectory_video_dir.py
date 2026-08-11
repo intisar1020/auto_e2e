@@ -8,8 +8,8 @@ Adapted from generate_trajectory_video.py:
 Usage:
   cd Model/data_parsing/kit_scenes
   python generate_trajectory_video_dir.py \
-    --scene-dir exp-1-subset/data/train/<sid> \
-    --output exp-2-subset/trajectory_video.mp4
+    --scene-dir datasets/train/<sid> \
+    --output trajectory_video.mp4
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ from model_components.view_fusion.projection import PinholeProjection
 #  "camera_ring_front_right", "camera_ring_rear", "camera_ring_rear_left", "camera_ring_rear_right"]
 _SHORT = ["front_ctr", "front", "front_L", "front_R", "rear", "rear_L", "rear_R"]
 
-EXP2_BASE = Path(__file__).parent / "exp-2-subset"
+EXP2_BASE = Path(__file__).parent / "exp-2-baseline"
 
 
 def _load_camera_frame_scene_dir(loader: SensorDataLoader, frame_idx: int) -> torch.Tensor:

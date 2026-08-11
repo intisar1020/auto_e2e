@@ -1,0 +1,408 @@
+{
+  "split_version": "v1",
+  "created": "2026-08-08",
+  "source": "KITScenes-Multimodal HF train split",
+  "note": "Fixed canonical split for all experiments. All scene dirs live under exp-1-subset/data/train/ (SDK split=\"train\" requirement); role is the canonical assignment here.",
+  "train_ids": [
+    "923a3b8d-fed4-26a5-cfc0-85d19404ca83",
+    "4df6c86e-854b-83f3-1995-e0379cec7fff",
+    "5de60371-d226-c01a-7bdc-cacd7caf4c72",
+    "af55f06c-d1be-0f75-d04d-c6fc75c56f19",
+    "cad4481d-ddc8-eea4-a451-e853a82e54e0",
+    "c562bd58-3b61-823f-cd04-4ef592b3dbb3",
+    "95be5796-e419-00f9-6101-0b461eef17ff",
+    "1133194d-9ced-cd9c-1ccb-472c2c1c423c",
+    "7efa7459-bc04-3091-3c4b-79d3b204c5f1",
+    "b2a8e88f-4da2-8634-20ec-63840d963dca",
+    "6c52397f-d11d-8e8c-7d03-1cec58d2f3cf",
+    "37e7604a-4dd5-f83b-5c6e-24e6e961e17f",
+    "54ac7b02-a910-9594-89b4-a63f50d11492",
+    "00efe646-1e8f-cadc-d642-e676781187ef",
+    "28e0d889-73be-2117-9bfe-16503314dff4",
+    "21cf920e-6a7d-68aa-8c6d-132b57b0afb5",
+    "9b8447aa-e029-4a64-c4a6-e60bf6517a65",
+    "4821ba97-b261-ad58-a08c-33b3530d65f8",
+    "25e334e7-d677-b878-c50a-43958c2224d4",
+    "0a122c3e-0d7d-2517-f09b-4b31bcd4a1f6",
+    "e6474d51-e798-90f4-7338-03b9447968d5",
+    "7824a909-dd2e-ac29-43f0-c97317105488",
+    "58a22774-002c-6945-bbe9-13c7a6fe81a7",
+    "223c2edc-5a05-af02-962e-db9e4ae8f1dc",
+    "f6b4a54b-bd92-df77-3396-f7de496e499f",
+    "cab9aec3-0b45-20ad-5b1e-73011b47eae3",
+    "57b3c2df-60ae-1663-02d2-2625ceed7d3d",
+    "03061343-717d-d268-6061-132126a655ad",
+    "57f34143-b9e1-e0f5-5d00-d209deb0a189",
+    "dfd31d59-2cbb-fd0d-99b2-6c78f80d8053",
+    "e69d0064-e870-60d7-c860-576d1199cb86",
+    "0aad79b4-a940-eb05-b379-7f2f960572d9",
+    "3ea689f7-422c-57f4-d29d-737ee5d95f8f",
+    "0f5ff24e-d7b5-f0e5-7875-bdf019f1b193",
+    "c95144a0-bde1-5042-6cf0-7387689255e0",
+    "29f7f42c-759a-9b55-0708-182071f76140",
+    "80f6d8a9-fd47-bfa5-e52c-361bd32218db",
+    "5681af64-27ce-777b-8a21-ed73622b6abe",
+    "5373e529-1339-38d4-18dd-3193713b31d7",
+    "8c73bd14-c47c-b27e-764a-90d8cd802255",
+    "49daba7e-d764-e0f4-ddf3-05241e66969e",
+    "564225e5-f2bf-c97a-8b1e-bcf2c1737d62",
+    "a1bcbda4-49ab-1104-9c27-e2fcc5f31a82",
+    "ad32c036-166e-4632-99c5-8995b5a03b64",
+    "c18a6aac-1c54-1a37-8171-544a8390a5e1",
+    "a33c225e-bc62-d86f-3dcb-898821420ff2",
+    "6bba2045-3094-32b8-3000-f5e20178fa2c",
+    "ed79db8b-28c7-899b-06e7-dd00a565f071",
+    "030fab63-ad51-bcc9-5a5f-5df67d9add59",
+    "ec558858-c0d2-c16c-8b36-5c267e2dcd4a"
+  ],
+  "val_ids": [
+    "c2952893-5847-b9fd-f164-a0cc0c462db5",
+    "8f428e68-6179-39f1-8452-0b1ecdba18f7",
+    "c6ef44c8-a113-7844-5abd-57e58f2cf456",
+    "77945790-ce04-512c-3a58-987ed9eb50b0",
+    "8f20f94d-b58e-b8cf-cb18-4e5178dfe51d"
+  ],
+  "tars": [
+    {
+      "sid": "923a3b8d-fed4-26a5-cfc0-85d19404ca83",
+      "role": "train",
+      "size_gb": 2.98,
+      "samples": 22
+    },
+    {
+      "sid": "4df6c86e-854b-83f3-1995-e0379cec7fff",
+      "role": "train",
+      "size_gb": 2.99,
+      "samples": 22
+    },
+    {
+      "sid": "5de60371-d226-c01a-7bdc-cacd7caf4c72",
+      "role": "train",
+      "size_gb": 2.98,
+      "samples": 12
+    },
+    {
+      "sid": "af55f06c-d1be-0f75-d04d-c6fc75c56f19",
+      "role": "train",
+      "size_gb": 2.95,
+      "samples": 32
+    },
+    {
+      "sid": "cad4481d-ddc8-eea4-a451-e853a82e54e0",
+      "role": "train",
+      "size_gb": 2.94,
+      "samples": 12
+    },
+    {
+      "sid": "c562bd58-3b61-823f-cd04-4ef592b3dbb3",
+      "role": "train",
+      "size_gb": 2.9,
+      "samples": 32
+    },
+    {
+      "sid": "95be5796-e419-00f9-6101-0b461eef17ff",
+      "role": "train",
+      "size_gb": 2.91,
+      "samples": 22
+    },
+    {
+      "sid": "c2952893-5847-b9fd-f164-a0cc0c462db5",
+      "role": "val",
+      "size_gb": 2.93,
+      "samples": 32
+    },
+    {
+      "sid": "8f428e68-6179-39f1-8452-0b1ecdba18f7",
+      "role": "val",
+      "size_gb": 2.93,
+      "samples": 2
+    },
+    {
+      "sid": "c6ef44c8-a113-7844-5abd-57e58f2cf456",
+      "role": "val",
+      "size_gb": 2.92,
+      "samples": 22
+    },
+    {
+      "sid": "1133194d-9ced-cd9c-1ccb-472c2c1c423c",
+      "role": "train",
+      "size_gb": 2.89,
+      "samples": 22
+    },
+    {
+      "sid": "7efa7459-bc04-3091-3c4b-79d3b204c5f1",
+      "role": "train",
+      "size_gb": 3.08,
+      "samples": 22
+    },
+    {
+      "sid": "b2a8e88f-4da2-8634-20ec-63840d963dca",
+      "role": "train",
+      "size_gb": 3.09,
+      "samples": 2
+    },
+    {
+      "sid": "6c52397f-d11d-8e8c-7d03-1cec58d2f3cf",
+      "role": "train",
+      "size_gb": 2.89,
+      "samples": 12
+    },
+    {
+      "sid": "37e7604a-4dd5-f83b-5c6e-24e6e961e17f",
+      "role": "train",
+      "size_gb": 3.09,
+      "samples": 22
+    },
+    {
+      "sid": "54ac7b02-a910-9594-89b4-a63f50d11492",
+      "role": "train",
+      "size_gb": 2.87,
+      "samples": 22
+    },
+    {
+      "sid": "00efe646-1e8f-cadc-d642-e676781187ef",
+      "role": "train",
+      "size_gb": 3.09,
+      "samples": 22
+    },
+    {
+      "sid": "28e0d889-73be-2117-9bfe-16503314dff4",
+      "role": "train",
+      "size_gb": 3.1,
+      "samples": 22
+    },
+    {
+      "sid": "21cf920e-6a7d-68aa-8c6d-132b57b0afb5",
+      "role": "train",
+      "size_gb": 3.11,
+      "samples": 22
+    },
+    {
+      "sid": "9b8447aa-e029-4a64-c4a6-e60bf6517a65",
+      "role": "train",
+      "size_gb": 2.86,
+      "samples": 12
+    },
+    {
+      "sid": "4821ba97-b261-ad58-a08c-33b3530d65f8",
+      "role": "train",
+      "size_gb": 2.85,
+      "samples": 2
+    },
+    {
+      "sid": "25e334e7-d677-b878-c50a-43958c2224d4",
+      "role": "train",
+      "size_gb": 3.12,
+      "samples": 42
+    },
+    {
+      "sid": "0a122c3e-0d7d-2517-f09b-4b31bcd4a1f6",
+      "role": "train",
+      "size_gb": 2.82,
+      "samples": 32
+    },
+    {
+      "sid": "e6474d51-e798-90f4-7338-03b9447968d5",
+      "role": "train",
+      "size_gb": 3.15,
+      "samples": 32
+    },
+    {
+      "sid": "7824a909-dd2e-ac29-43f0-c97317105488",
+      "role": "train",
+      "size_gb": 2.84,
+      "samples": 47
+    },
+    {
+      "sid": "58a22774-002c-6945-bbe9-13c7a6fe81a7",
+      "role": "train",
+      "size_gb": 3.16,
+      "samples": 42
+    },
+    {
+      "sid": "223c2edc-5a05-af02-962e-db9e4ae8f1dc",
+      "role": "train",
+      "size_gb": 2.8,
+      "samples": 22
+    },
+    {
+      "sid": "f6b4a54b-bd92-df77-3396-f7de496e499f",
+      "role": "train",
+      "size_gb": 3.18,
+      "samples": 42
+    },
+    {
+      "sid": "cab9aec3-0b45-20ad-5b1e-73011b47eae3",
+      "role": "train",
+      "size_gb": 2.8,
+      "samples": 2
+    },
+    {
+      "sid": "57b3c2df-60ae-1663-02d2-2625ceed7d3d",
+      "role": "train",
+      "size_gb": 2.92,
+      "samples": 2
+    },
+    {
+      "sid": "03061343-717d-d268-6061-132126a655ad",
+      "role": "train",
+      "size_gb": 2.91,
+      "samples": 2
+    },
+    {
+      "sid": "57f34143-b9e1-e0f5-5d00-d209deb0a189",
+      "role": "train",
+      "size_gb": 2.78,
+      "samples": 22
+    },
+    {
+      "sid": "dfd31d59-2cbb-fd0d-99b2-6c78f80d8053",
+      "role": "train",
+      "size_gb": 2.78,
+      "samples": 37
+    },
+    {
+      "sid": "e69d0064-e870-60d7-c860-576d1199cb86",
+      "role": "train",
+      "size_gb": 3.19,
+      "samples": 22
+    },
+    {
+      "sid": "0aad79b4-a940-eb05-b379-7f2f960572d9",
+      "role": "train",
+      "size_gb": 2.75,
+      "samples": 22
+    },
+    {
+      "sid": "3ea689f7-422c-57f4-d29d-737ee5d95f8f",
+      "role": "train",
+      "size_gb": 3.2,
+      "samples": 22
+    },
+    {
+      "sid": "0f5ff24e-d7b5-f0e5-7875-bdf019f1b193",
+      "role": "train",
+      "size_gb": 3.25,
+      "samples": 22
+    },
+    {
+      "sid": "77945790-ce04-512c-3a58-987ed9eb50b0",
+      "role": "val",
+      "size_gb": 3.91,
+      "samples": 52
+    },
+    {
+      "sid": "c95144a0-bde1-5042-6cf0-7387689255e0",
+      "role": "train",
+      "size_gb": 4.08,
+      "samples": 52
+    },
+    {
+      "sid": "29f7f42c-759a-9b55-0708-182071f76140",
+      "role": "train",
+      "size_gb": 4.26,
+      "samples": 102
+    },
+    {
+      "sid": "80f6d8a9-fd47-bfa5-e52c-361bd32218db",
+      "role": "train",
+      "size_gb": 3.23,
+      "samples": 52
+    },
+    {
+      "sid": "5681af64-27ce-777b-8a21-ed73622b6abe",
+      "role": "train",
+      "size_gb": 2.22,
+      "samples": 2
+    },
+    {
+      "sid": "5373e529-1339-38d4-18dd-3193713b31d7",
+      "role": "train",
+      "size_gb": 4.03,
+      "samples": 72
+    },
+    {
+      "sid": "8c73bd14-c47c-b27e-764a-90d8cd802255",
+      "role": "train",
+      "size_gb": 3.54,
+      "samples": 42
+    },
+    {
+      "sid": "49daba7e-d764-e0f4-ddf3-05241e66969e",
+      "role": "train",
+      "size_gb": 4.09,
+      "samples": 72
+    },
+    {
+      "sid": "564225e5-f2bf-c97a-8b1e-bcf2c1737d62",
+      "role": "train",
+      "size_gb": 2.67,
+      "samples": 22
+    },
+    {
+      "sid": "8f20f94d-b58e-b8cf-cb18-4e5178dfe51d",
+      "role": "val",
+      "size_gb": 3.52,
+      "samples": 37
+    },
+    {
+      "sid": "a1bcbda4-49ab-1104-9c27-e2fcc5f31a82",
+      "role": "train",
+      "size_gb": 3.77,
+      "samples": 32
+    },
+    {
+      "sid": "ad32c036-166e-4632-99c5-8995b5a03b64",
+      "role": "train",
+      "size_gb": 3.55,
+      "samples": 52
+    },
+    {
+      "sid": "c18a6aac-1c54-1a37-8171-544a8390a5e1",
+      "role": "train",
+      "size_gb": 3.71,
+      "samples": 52
+    },
+    {
+      "sid": "a33c225e-bc62-d86f-3dcb-898821420ff2",
+      "role": "train",
+      "size_gb": 3.63,
+      "samples": 82
+    },
+    {
+      "sid": "6bba2045-3094-32b8-3000-f5e20178fa2c",
+      "role": "train",
+      "size_gb": 3.41,
+      "samples": 32
+    },
+    {
+      "sid": "ed79db8b-28c7-899b-06e7-dd00a565f071",
+      "role": "train",
+      "size_gb": 4.02,
+      "samples": 72
+    },
+    {
+      "sid": "030fab63-ad51-bcc9-5a5f-5df67d9add59",
+      "role": "train",
+      "size_gb": 4.14,
+      "samples": 72
+    },
+    {
+      "sid": "ec558858-c0d2-c16c-8b36-5c267e2dcd4a",
+      "role": "train",
+      "size_gb": 3.3,
+      "samples": 22
+    }
+  ],
+  "totals": {
+    "tars": 55,
+    "size_gb": 175.1,
+    "samples": 1725,
+    "train_tars": 50,
+    "train_size_gb": 158.9,
+    "train_samples": 1580,
+    "val_tars": 5,
+    "val_size_gb": 16.2,
+    "val_samples": 145
+  }
+}
