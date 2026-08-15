@@ -26,6 +26,14 @@ Key design points
   camera projection), gradient clipping, and per-epoch validation on the fixed
   val split. The best checkpoint is selected by 6.4 s ADE.
 
+* **Route-consistency loss (optional)**: with ``--route-consistency-weight``
+  (default 0.10; 0 disables), the training objective is the weighted sum of the
+  imitation loss and the upstream ``RouteConsistencyLoss``, which integrates the
+  predicted controls into a rollout and penalizes going off the selected route
+  corridor / road heading / destination (using the loss-only supervision rasters
+  packed in each sample's ``route_supervision.npz``). This is the exp-3
+  experiment objective; set it to 0 to reproduce the exp-2-baseline exactly.
+
 * **Metrics**: ADE/FDE are reported at both the 3 s and full 6.4 s horizons
   (trajectory is 64 steps @ 10 Hz). Validation runs in ``mode="infer"`` with a
   real per-sample initial speed extracted from the egomotion history.
@@ -76,7 +84,8 @@ from evaluation.metrics import integrate_trajectory
 from model_components.auto_e2e import AutoE2E
 from model_components.losses.trajectory_loss import TrajectoryImitationLoss
 from model_components.view_fusion.projection import PinholeProjection
-from navigation.artifacts import decode_sample_navigation
+from navigation.artifacts import decode_route_supervision, decode_sample_navigation
+from training.losses import RouteConsistencyLoss
 
 KIT_DIR = Path(__file__).parent
 DATA_ROOT = KIT_DIR / "datasets"
@@ -161,6 +170,57 @@ def _tensors(s, device):
     mv = torch.ones(1, dtype=torch.bool, device=device)
     rv = torch.ones(1, dtype=torch.bool, device=device)
     return v, eg, vh, tg, cp, mc, rm, mv, rv
+
+
+def _route_supervision_batch(s, device):
+    """Build the route-supervision batch dict consumed by RouteConsistencyLoss.
+
+    Decodes ``route_supervision.npz`` from the sample's navigation members and
+    reshapes each field into the ``[B,H,W]`` / ``[B]`` / ``[B,2]`` tensor
+    layout the loss expects (matching ``pre_extracted.py``). Also returns the
+    route-validity flags the loss gates on.
+
+    Args:
+        s: A ``KitScenesSample`` with ``navigation_members``.
+        device: Torch device.
+
+    Returns:
+        (route_supervision, route_valid, route_intersection):
+            route_supervision - dict of tensors:
+                distance_to_corridor_m [1,H,W], route_heading_sin/cos/valid
+                [1,H,W], destination_xy_m [1,2], destination_visible [1],
+                available [1].
+            route_valid - [1] bool from navigation metadata.
+            route_intersection - [1] bool from navigation metadata.
+    """
+    sup = decode_route_supervision(s["navigation_members"])
+    _, _, meta = decode_sample_navigation(s["navigation_members"])
+    route_valid = torch.tensor(
+        [bool(meta["route_valid"])], dtype=torch.bool, device=device
+    )
+    route_intersection = torch.tensor(
+        [bool(meta["route_intersection"])], dtype=torch.bool, device=device
+    )
+
+    def _t(arr):
+        return torch.from_numpy(np.asarray(arr).copy()).float().unsqueeze(0).to(device)
+
+    route_supervision = {
+        "distance_to_corridor_m": _t(sup.distance_to_corridor_m),
+        "distance_to_drivable_m": _t(sup.distance_to_drivable_m),
+        "route_heading_sin": _t(sup.route_heading_sin),
+        "route_heading_cos": _t(sup.route_heading_cos),
+        "route_heading_valid": _t(sup.route_heading_valid),
+        "destination_xy_m": _t(sup.destination_xy_m),
+        "destination_visible": torch.tensor(
+            [bool(sup.destination_visible)], dtype=torch.bool, device=device
+        ),
+        "available": route_valid.clone(),
+        "drivable_available": torch.tensor(
+            [bool(sup.drivable_available)], dtype=torch.bool, device=device
+        ),
+    }
+    return route_supervision, route_valid, route_intersection
 
 
 def _extract_v0(s) -> float:
@@ -333,36 +393,46 @@ def _validate(model, val_ds, device, lfn):
     return {k: v / max(1, n) for k, v in acc.items()}, tot_loss / max(1, n), n
 
 
-def _forward(model, sample, device, *, augment: bool):
-    """Run the model on one sample and return (prediction, target).
+def _forward(model, sample, device, *, augment: bool, route_weight: float = 0.0):
+    """Run the model on one sample and return (prediction, target, route_batch).
 
     Args:
         model: AutoE2E model.
         sample: A ``KitScenesSample`` from ``KitScenesDataset``.
         device: Torch device.
         augment: Whether to apply photometric augmentation (train mode only).
+        route_weight: If > 0, also decode the route-supervision batch for the
+            RouteConsistencyLoss term.
 
     Returns:
-        (out, tg): predicted trajectory [1,128] and target trajectory [1,128].
+        (out, tg, route_batch):
+            out - predicted trajectory [1,128].
+            tg - target trajectory [1,128].
+            route_batch - (route_supervision, route_valid, route_intersection)
+                or None when ``route_weight <= 0``.
     """
     v, eg, vh, tg, cp, mc, rm, mv, rv = _tensors(sample, device)
     if augment:
         v = _augment_image(v)
+    route_batch = (
+        _route_supervision_batch(sample, device) if route_weight > 0 else None
+    )
     with torch.amp.autocast("cuda"):
         out = model(v, mc, vh, eg, route_mask=rm, map_valid=mv,
                     route_valid=rv, projection=PinholeProjection(cp),
                     geometry_type="pinhole", trajectory_target=tg, mode="train")
-    return out, tg
+    return out, tg, route_batch
 
 
-def train_epoch(epoch, model, train_ds, opt, sched, lfn, device, args,
-                step, traj_dir, t_start):
-    """Train one full epoch and return (mean_train_loss, step).
+def train_epoch(epoch, model, train_ds, opt, sched, lfn, route_lfn, device,
+                args, step, traj_dir, t_start):
+    """Train one full epoch and return (mean_train_loss, route_terms_sum, step).
 
     Iterates the (shuffled) training samples once, running the forward pass and
-    the imitation loss with gradient accumulation, clipping, and a cosine LR
-    step every ``grad_accum`` micro-batches. Also emits a GT-vs-prediction
-    trajectory plot every ``PLOT_EVERY`` steps as a visual diary.
+    the imitation loss (+ optionally the route-consistency loss) with gradient
+    accumulation, clipping, and a cosine LR step every ``grad_accum``
+    micro-batches. Also emits a GT-vs-prediction trajectory plot every
+    ``PLOT_EVERY`` steps as a visual diary.
 
     Args:
         epoch: 1-based epoch number (for logging).
@@ -371,6 +441,7 @@ def train_epoch(epoch, model, train_ds, opt, sched, lfn, device, args,
         opt: AdamW optimizer.
         sched: CosineAnnealingLR scheduler.
         lfn: TrajectoryImitationLoss.
+        route_lfn: RouteConsistencyLoss or None (disabled when weight <= 0).
         device: Torch device.
         args: Parsed CLI args.
         step: Global optimizer-step counter (mutable via return value).
@@ -378,11 +449,20 @@ def train_epoch(epoch, model, train_ds, opt, sched, lfn, device, args,
         t_start: Wall-clock start time for progress logging.
 
     Returns:
-        (mean_epoch_loss, step): mean train loss over the epoch and the new
-        global step counter.
+        (mean_epoch_loss, route_terms_sum, step):
+            mean_epoch_loss - mean total train loss over the epoch.
+            route_terms_sum - dict of summed route term means per term
+                (corridor/branch/destination/heading/eligible_count) or None.
+            step - new global step counter.
     """
     n_train = len(train_ds)
     epoch_loss = 0.0
+    route_terms_sum = (
+        {"corridor": 0.0, "branch": 0.0, "destination": 0.0,
+         "heading": 0.0, "eligible_count": 0.0, "candidate_count": 0.0,
+         "count": 0}
+        if route_lfn is not None else None
+    )
     opt.zero_grad(set_to_none=True)
 
     # Shuffle the sample order each epoch (unless --no-shuffle) so the
@@ -394,10 +474,27 @@ def train_epoch(epoch, model, train_ds, opt, sched, lfn, device, args,
 
     for idx_count, i in enumerate(perm):
         sample = train_ds[i]
-        out, tg = _forward(model, sample, device, augment=not args.no_augment)
+        route_weight = args.route_consistency_weight if route_lfn is not None else 0.0
+        out, tg, route_batch = _forward(
+            model, sample, device, augment=not args.no_augment,
+            route_weight=route_weight,
+        )
         # Divide by grad_accum so accumulated gradients match a
         # grad_accum-sized "virtual batch" learning rate.
         loss = lfn(out, tg) / args.grad_accum
+        if route_lfn is not None and route_batch is not None:
+            route_sup, route_valid, route_intersection = route_batch
+            v0 = torch.tensor([_extract_v0(sample)], device=device)
+            # RouteConsistencyLoss integrates in fp32 (its own rollout casts to
+            # float32); feed fp32 controls since autocast leaves out/tg in fp16.
+            route_terms = route_lfn(out.float(), tg.float(), v0, route_sup,
+                                    route_valid, route_intersection)
+            loss = loss + (args.route_consistency_weight
+                           * route_terms["total"] / args.grad_accum)
+            for key in ("corridor", "branch", "destination", "heading",
+                        "eligible_count", "candidate_count"):
+                route_terms_sum[key] += float(route_terms[key])
+            route_terms_sum["count"] += 1
         loss.backward()
 
         # Optimizer step every grad_accum micro-batches.
@@ -436,7 +533,11 @@ def train_epoch(epoch, model, train_ds, opt, sched, lfn, device, args,
         sched.step()
         opt.zero_grad(set_to_none=True)
 
-    return epoch_loss / n_train, step
+    if route_terms_sum is not None and route_terms_sum["count"] > 0:
+        n_rt = route_terms_sum["count"]
+        route_terms_sum = {k: (v / n_rt if k not in ("count",) else v)
+                           for k, v in route_terms_sum.items()}
+    return epoch_loss / n_train, route_terms_sum, step
 
 
 def save_val_curve(history, ckpt_dir):
@@ -500,6 +601,10 @@ def train(args):
             print(f"WARNING: init ckpt not found at {init_ckpt}; training from scratch")
     lfn = TrajectoryImitationLoss(loss_type="smooth_l1", temporal_decay=0.95,
                                   signal_scales=(0.778, 0.0350)).to(device)
+    route_lfn = None
+    if args.route_consistency_weight > 0:
+        route_lfn = RouteConsistencyLoss().to(device)
+        print(f"route-consistency loss ON (weight {args.route_consistency_weight})")
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
     # Cosine LR anneals over the TOTAL number of optimizer steps (not per epoch),
     # so the schedule is fixed regardless of where epochs fall on the boundary.
@@ -507,16 +612,16 @@ def train(args):
     n_steps = steps_per_epoch * args.epochs
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=n_steps, eta_min=1e-6)
 
-    history = {"train_loss": [], "val": [], "iter": []}
+    history = {"train_loss": [], "val": [], "iter": [], "route": []}
     best_ade = float("inf")
     t_start = time.time()
     step = 0
 
     for epoch in range(args.epochs):
         print(f"\n=== EPOCH {epoch + 1}/{args.epochs} ===")
-        train_avg, step = train_epoch(
-            epoch + 1, model, train_ds, opt, sched, lfn, device, args,
-            step, traj_dir, t_start,
+        train_avg, route_terms_sum, step = train_epoch(
+            epoch + 1, model, train_ds, opt, sched, lfn, route_lfn, device,
+            args, step, traj_dir, t_start,
         )
 
         # Epoch summary: mean train loss + val loss/ADE/FDE at both horizons.
@@ -530,6 +635,14 @@ def train(args):
                                "ade_64s": vac["ade"], "fde_64s": vac["fde"],
                                "n": vn})
         history["iter"].append(step)
+        if route_terms_sum is not None:
+            history["route"].append({"epoch": epoch + 1, **route_terms_sum})
+            print(f"    route: corridor {route_terms_sum['corridor']:.4f} "
+                  f"branch {route_terms_sum['branch']:.4f} "
+                  f"dest {route_terms_sum['destination']:.4f} "
+                  f"heading {route_terms_sum['heading']:.4f} "
+                  f"eligible {route_terms_sum['eligible_count']:.0f}/"
+                  f"{route_terms_sum['candidate_count']:.0f}")
         # Best checkpoint = lowest 6.4 s val ADE; latest = most recent epoch.
         if vac["ade"] < best_ade:
             best_ade = vac["ade"]
@@ -568,6 +681,8 @@ def main():
                     default=str(KIT_DIR / "exp-2-baseline" / "checkpoints"
                                 / "best.pt"),
                     help="checkpoint to initialize from")
+    ap.add_argument("--route-consistency-weight", type=float, default=0.10,
+                    help="weight of the RouteConsistencyLoss term (0 disables)")
     train(ap.parse_args())
 
 
