@@ -21,7 +21,8 @@ class AutoE2E(nn.Module):
     def __init__(self, backbone="swin_v2_tiny", num_views=7, embed_dim=256,
                  is_pretrained=True,
                  image_feature_size=8, view_fusion_kwargs=None,
-                 num_timesteps=64, num_signals=2, egomotion_dim=256,
+                 num_timesteps=64, num_signals=2,
+                 egomotion_dim=256,
                  visual_history_dim=896,
                  map_type="rasterized", map_context_channels=3,
                  route_channels=2, enable_route_conditioning=True,
@@ -32,6 +33,23 @@ class AutoE2E(nn.Module):
                  enable_reasoning=False, reasoning_mode="none",
                  reasoning_kwargs: Optional[Dict[str, Any]] = None):
         super(AutoE2E, self).__init__()
+
+        # Normalization of the egomotion history vector
+      
+        def normalize_egomotion(egomotion_history):
+            for b in range(0, len(egomotion_history)):
+                for i in range(0, len(egomotion_history[b]), 4):
+                    # speed normalized equals raw speed in m/s divided by 33
+                    # corresponding to a max speed of 74 mph
+                    egomotion_history[b][i] = egomotion_history[b][i]/33
+        
+                    # acceleration normalized equals raw acceleration in 
+                    # ms/2 divided by 8, since that equates to harsh
+                    # emergency braking maneouvre
+                    egomotion_history[b][i+1] = egomotion_history[b][i+1]/8
+
+        self.normalize_egomotion = normalize_egomotion
+
 
         # Reactive model which runs at 10Hz and processes multi-camera inputs
         # a rendered map image and egomotion history to predict a driving trajectory
@@ -44,7 +62,8 @@ class AutoE2E(nn.Module):
         self.Reactive_E2E = ReactiveE2E(backbone=backbone, num_views=num_views, embed_dim=embed_dim,
                  is_pretrained=is_pretrained,
                  image_feature_size=image_feature_size, view_fusion_kwargs=view_fusion_kwargs,
-                 num_timesteps=num_timesteps, num_signals=num_signals, egomotion_dim=egomotion_dim,
+                 num_timesteps=num_timesteps, num_signals=num_signals,
+                 egomotion_dim=egomotion_dim,
                  visual_history_dim=visual_history_dim,
                  map_type=map_type,
                  map_context_channels=map_context_channels,
@@ -164,6 +183,12 @@ class AutoE2E(nn.Module):
                 f"absorb the argument silently and the model would run on "
                 f"geometry_type='pseudo' — a learned spatial prior, not your calibration."
             )
+
+        # Normalization function for egomotion_history
+        # scales the raw speed and acceleration values to a sensible range
+        # for the model
+        self.normalize_egomotion(egomotion_history)
+
 
         # World Action Model (1 Hz): produce the Encoded Visual History fed to the
         # reactive planner + reasoning branch, and (in training) the predicted
