@@ -33,7 +33,7 @@ sys.path.insert(0, str(_MODEL_DIR))
 
 from data_parsing.kit_scenes import KitScenesDataset
 
-BASE = Path(__file__).parent / "exp-1-subset"
+BASE = Path(__file__).parent / "datasets"
 MANIFEST = BASE / "manifest.json"
 CHUNK = 64 * 1024 * 1024
 
@@ -45,7 +45,7 @@ def _fs():
 
 def download_one(sid: str) -> dict:
     """Download + extract one tar; returns result dict."""
-    dest = BASE / "data" / "train" / sid
+    dest = BASE / "train" / sid
     if dest.is_dir():
         return {"sid": sid, "status": "done", "samples": -1, "note": "already-extracted"}
     p = f"datasets/KIT-MRT/KITScenes-Multimodal/data/train/{sid}.tar"
@@ -77,7 +77,7 @@ def download_one(sid: str) -> dict:
         return {"sid": sid, "status": "error", "samples": -1, "note": last_err}
     tmp.unlink(missing_ok=True)
     try:
-        ds = KitScenesDataset(data_root=str(BASE / "data"), split="train",
+        ds = KitScenesDataset(data_root=str(BASE), split="train",
                               include_navigation=True, scene_ids=[sid])
         n = len(ds)
     except ValueError:

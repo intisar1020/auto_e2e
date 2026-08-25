@@ -1,8 +1,8 @@
 {
-  "split_version": "v1",
-  "created": "2026-08-08",
+  "split_version": "v2",
+  "created": "2026-08-16",
   "source": "KITScenes-Multimodal HF train split",
-  "note": "Fixed canonical split for all experiments. All scene dirs live under exp-1-subset/data/train/ (SDK split=\"train\" requirement); role is the canonical assignment here.",
+  "note": "v2: +15 tars (~40GB, 4 val / 11 train) from HF, pre-validated >=129 poses; train from scratch exp-5-route-only.",
   "train_ids": [
     "923a3b8d-fed4-26a5-cfc0-85d19404ca83",
     "4df6c86e-854b-83f3-1995-e0379cec7fff",
@@ -53,14 +53,29 @@
     "6bba2045-3094-32b8-3000-f5e20178fa2c",
     "ed79db8b-28c7-899b-06e7-dd00a565f071",
     "030fab63-ad51-bcc9-5a5f-5df67d9add59",
-    "ec558858-c0d2-c16c-8b36-5c267e2dcd4a"
+    "ec558858-c0d2-c16c-8b36-5c267e2dcd4a",
+    "0f92540f-ffd4-fb3c-aeee-fc7330a136ca",
+    "b73800d1-81c0-748c-6da7-d6cadcc87175",
+    "fc0bbcec-e25e-2d1a-ef5d-0ec5c1f093bf",
+    "d07d07fa-6124-8d93-d936-d385edf8082b",
+    "65e8b066-f3cc-8a34-04d3-3c303cdf713d",
+    "e7e0844b-e5b4-711e-9b15-c487a8afcaa9",
+    "21361907-57a3-f12b-eeb1-fda54e34a327",
+    "b7af09af-449f-1c80-a96d-503265896946",
+    "08c2bc51-b199-d60c-d6d2-e5dd58be3d41",
+    "8c498268-2848-9863-1b59-109919aad610",
+    "77bcf438-091f-7029-735c-f7f1dbee5283"
   ],
   "val_ids": [
     "c2952893-5847-b9fd-f164-a0cc0c462db5",
     "8f428e68-6179-39f1-8452-0b1ecdba18f7",
     "c6ef44c8-a113-7844-5abd-57e58f2cf456",
     "77945790-ce04-512c-3a58-987ed9eb50b0",
-    "8f20f94d-b58e-b8cf-cb18-4e5178dfe51d"
+    "8f20f94d-b58e-b8cf-cb18-4e5178dfe51d",
+    "5d5629b2-2117-5f0b-c03b-c2d5d98fdf4b",
+    "7f323ac5-31d9-7b89-a0e4-1cf07f69826e",
+    "a17fb5e7-2ec6-39c9-f7a5-a3b597cb14f5",
+    "a3f5a02b-fcef-4834-0688-2d07b01a5d74"
   ],
   "tars": [
     {
@@ -392,17 +407,107 @@
       "role": "train",
       "size_gb": 3.3,
       "samples": 22
+    },
+    {
+      "sid": "0f92540f-ffd4-fb3c-aeee-fc7330a136ca",
+      "role": "train",
+      "size_gb": 2.5,
+      "samples": 12
+    },
+    {
+      "sid": "b73800d1-81c0-748c-6da7-d6cadcc87175",
+      "role": "train",
+      "size_gb": 2.5,
+      "samples": 12
+    },
+    {
+      "sid": "fc0bbcec-e25e-2d1a-ef5d-0ec5c1f093bf",
+      "role": "train",
+      "size_gb": 2.55,
+      "samples": 2
+    },
+    {
+      "sid": "5d5629b2-2117-5f0b-c03b-c2d5d98fdf4b",
+      "role": "val",
+      "size_gb": 2.55,
+      "samples": 12
+    },
+    {
+      "sid": "d07d07fa-6124-8d93-d936-d385edf8082b",
+      "role": "train",
+      "size_gb": 2.59,
+      "samples": 7
+    },
+    {
+      "sid": "65e8b066-f3cc-8a34-04d3-3c303cdf713d",
+      "role": "train",
+      "size_gb": 2.61,
+      "samples": 22
+    },
+    {
+      "sid": "e7e0844b-e5b4-711e-9b15-c487a8afcaa9",
+      "role": "train",
+      "size_gb": 2.61,
+      "samples": 2
+    },
+    {
+      "sid": "7f323ac5-31d9-7b89-a0e4-1cf07f69826e",
+      "role": "val",
+      "size_gb": 2.63,
+      "samples": 2
+    },
+    {
+      "sid": "21361907-57a3-f12b-eeb1-fda54e34a327",
+      "role": "train",
+      "size_gb": 2.65,
+      "samples": 12
+    },
+    {
+      "sid": "b7af09af-449f-1c80-a96d-503265896946",
+      "role": "train",
+      "size_gb": 2.68,
+      "samples": 2
+    },
+    {
+      "sid": "08c2bc51-b199-d60c-d6d2-e5dd58be3d41",
+      "role": "train",
+      "size_gb": 2.68,
+      "samples": 22
+    },
+    {
+      "sid": "8c498268-2848-9863-1b59-109919aad610",
+      "role": "train",
+      "size_gb": 2.72,
+      "samples": 2
+    },
+    {
+      "sid": "a17fb5e7-2ec6-39c9-f7a5-a3b597cb14f5",
+      "role": "val",
+      "size_gb": 2.75,
+      "samples": 22
+    },
+    {
+      "sid": "77bcf438-091f-7029-735c-f7f1dbee5283",
+      "role": "train",
+      "size_gb": 2.75,
+      "samples": 22
+    },
+    {
+      "sid": "a3f5a02b-fcef-4834-0688-2d07b01a5d74",
+      "role": "val",
+      "size_gb": 3.25,
+      "samples": 37
     }
   ],
   "totals": {
-    "tars": 55,
-    "size_gb": 175.1,
-    "samples": 1725,
-    "train_tars": 50,
-    "train_size_gb": 158.9,
-    "train_samples": 1580,
-    "val_tars": 5,
-    "val_size_gb": 16.2,
-    "val_samples": 145
+    "tars": 70,
+    "size_gb": 215.1,
+    "samples": 1915,
+    "train_tars": 61,
+    "train_size_gb": 187.7,
+    "train_samples": 1697,
+    "val_tars": 9,
+    "val_size_gb": 27.4,
+    "val_samples": 218
   }
 }

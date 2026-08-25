@@ -75,6 +75,7 @@ import torch
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
 
 _MODEL_DIR = Path(__file__).parent.parent.parent.resolve()
 sys.path.insert(0, str(_MODEL_DIR))
@@ -92,6 +93,9 @@ DATA_ROOT = KIT_DIR / "datasets"
 SPLITS = KIT_DIR / "splits.json"
 DEFAULT_EXP = "exp-3-route-consistency"
 PLOT_EVERY = 200
+# Route-only experiment: when set, the 14-channel semantic map is dropped and
+# only the 2-channel route raster is fed to the NavigationEncoder (in_chans=2).
+ROUTE_ONLY = True
 
 
 def _load_split():
@@ -156,7 +160,12 @@ def _tensors(s, device):
     tg = s["trajectory_target"].unsqueeze(0).to(device).float()
     cp = s["camera_params"].unsqueeze(0).to(device).float()
 
-    if "navigation_members" in s:
+    if ROUTE_ONLY:
+        # Route-only experiment: drop the 14-channel semantic map, feed only
+        # the 2-channel route raster through the shared NavigationEncoder.
+        mc = np.zeros((0, 256, 256), dtype=np.float32)
+        rm = np.zeros((2, 256, 256), dtype=np.float32)
+    elif "navigation_members" in s:
         mc, rm, _ = decode_sample_navigation(s["navigation_members"])
     else:
         # Navigation-less samples (should not happen for KITScenes): feed blank
@@ -351,6 +360,76 @@ def _save_trajectory_plot(iter_idx, pred_np, tgt_np, loss, out_dir, v0=10.0):
     plt.close(fig)
 
 
+def _save_pca_bev(model, val_ds, device, out_dir, tag: str, n_samples=3):
+    """Save 3-channel PCA visualization of fused BEV features with given tag filename.
+
+    Runs the model (infer mode, no grad) on a small fixed subset of the val
+    split and captures the output of ``MapBEVFusion`` — the fused image+map BEV
+    features at shape (B, embed_dim, bev_h, bev_w) — BEFORE ``FusedFeaturePooling``
+    collapses them. A 3-component PCA over the channel dimension projects the
+    high-dim feature map into an RGB image so its spatial structure (and how it
+    evolves across training) is visible.
+
+    Args:
+        model: AutoE2E model.
+        val_ds: Validation ``KitScenesDataset``.
+        device: Torch device.
+        out_dir: Directory to write ``<tag>.png`` into.
+        tag: Filename tag (e.g. "iter_00200" or "epoch_001").
+        n_samples: Number of val samples to visualize in a row (0 disables).
+    """
+    if n_samples <= 0:
+        return
+    fusion = model.Reactive_E2E.MapBEVFusion
+    captured = []
+
+    def _hook(mod, args, out):
+        captured.append(out.detach().float().cpu())
+
+    handle = fusion.register_forward_hook(_hook)
+    model.eval()
+    try:
+        with torch.no_grad():
+            for i in range(min(n_samples, len(val_ds))):
+                sample = val_ds[i]
+                v, eg, vh, tg, cp, mc, rm, mv, rv = _tensors(sample, device)
+                with torch.amp.autocast("cuda"):
+                    model(v, mc, vh, eg, route_mask=rm, map_valid=mv,
+                          route_valid=rv, projection=PinholeProjection(cp),
+                          geometry_type="pinhole", trajectory_target=tg,
+                          mode="infer")
+    finally:
+        handle.remove()
+        model.train()
+
+    if not captured:
+        return
+    # fused features: list of (B, C, H, W) → stack along sample axis.
+    feats = torch.cat(captured, dim=0)  # (N, C, H, W)
+    n, c, h, w = feats.shape
+    flat = feats.permute(0, 2, 3, 1).reshape(n * h * w, c).numpy()
+    pca = PCA(n_components=3)
+    proj = pca.fit_transform(flat)      # (N*H*W, 3)
+    proj = proj.reshape(n, h, w, 3)
+    # Per-sample min-max normalize to [0,1] for RGB display.
+    proj = (proj - proj.min(axis=(1, 2), keepdims=True))
+    rng = proj.max(axis=(1, 2), keepdims=True) - proj.min(axis=(1, 2), keepdims=True)
+    proj = proj / np.maximum(rng, 1e-6)
+
+    fig, axes = plt.subplots(1, n, figsize=(4 * n, 4))
+    for i in range(n):
+        axes[i].imshow(proj[i])
+        axes[i].axis("off")
+        axes[i].set_title(f"{tag} s{i+1}\nPCA {pca.explained_variance_ratio_[0]:.2f} "
+                          f"/{pca.explained_variance_ratio_[1]:.2f} "
+                          f"/{pca.explained_variance_ratio_[2]:.2f}")
+    fig.suptitle(f"fused BEV (before pooling) {tag}", fontsize=10)
+    fig.tight_layout()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_dir / f"{tag}.png", dpi=110)
+    plt.close(fig)
+
+
 def _validate(model, val_ds, device, lfn):
     """Run imitation-loss validation over the whole val split.
 
@@ -424,36 +503,15 @@ def _forward(model, sample, device, *, augment: bool, route_weight: float = 0.0)
     return out, tg, route_batch
 
 
-def train_epoch(epoch, model, train_ds, opt, sched, lfn, route_lfn, device,
-                args, step, traj_dir, t_start):
+def train_epoch(epoch, model, train_ds, val_ds, opt, sched, lfn, route_lfn, device,
+                args, step, traj_dir, pca_dir, t_start):
     """Train one full epoch and return (mean_train_loss, route_terms_sum, step).
 
     Iterates the (shuffled) training samples once, running the forward pass and
     the imitation loss (+ optionally the route-consistency loss) with gradient
     accumulation, clipping, and a cosine LR step every ``grad_accum``
-    micro-batches. Also emits a GT-vs-prediction trajectory plot every
-    ``PLOT_EVERY`` steps as a visual diary.
-
-    Args:
-        epoch: 1-based epoch number (for logging).
-        model: AutoE2E model (train mode).
-        train_ds: Training ``KitScenesDataset``.
-        opt: AdamW optimizer.
-        sched: CosineAnnealingLR scheduler.
-        lfn: TrajectoryImitationLoss.
-        route_lfn: RouteConsistencyLoss or None (disabled when weight <= 0).
-        device: Torch device.
-        args: Parsed CLI args.
-        step: Global optimizer-step counter (mutable via return value).
-        traj_dir: Directory for trajectory plot PNGs.
-        t_start: Wall-clock start time for progress logging.
-
-    Returns:
-        (mean_epoch_loss, route_terms_sum, step):
-            mean_epoch_loss - mean total train loss over the epoch.
-            route_terms_sum - dict of summed route term means per term
-                (corridor/branch/destination/heading/eligible_count) or None.
-            step - new global step counter.
+    micro-batches. Also emits GT-vs-prediction trajectory and PCA-BEV plots
+    every ``PLOT_EVERY`` steps as a visual diary.
     """
     n_train = len(train_ds)
     epoch_loss = 0.0
@@ -517,13 +575,16 @@ def train_epoch(epoch, model, train_ds, opt, sched, lfn, route_lfn, device,
                   f"(lr {sched.get_last_lr()[0]:.2e}, "
                   f"RSS {rss:.2f}G VRAM {vram:.2f}G, "
                   f"{time.time()-t_start:.0f}s)", flush=True)
-        # Visual diary: GT-vs-prediction trajectory plot every PLOT_EVERY steps.
+        # Visual diary: GT-vs-prediction trajectory & PCA BEV plots every PLOT_EVERY steps.
         if step % PLOT_EVERY == 0:
             v0 = _extract_v0(sample)
             _save_trajectory_plot(step, out.detach().cpu().numpy()[0],
                                   tg.detach().cpu().numpy()[0],
                                   float(loss.item() * args.grad_accum),
                                   traj_dir, v0=v0)
+            if args.pca_samples > 0:
+                _save_pca_bev(model, val_ds, device, pca_dir, tag=f"iter_{step:05d}",
+                              n_samples=args.pca_samples)
 
     # Flush remaining accumulated gradients if epoch end doesn't align with grad_accum.
     if n_train % args.grad_accum != 0:
@@ -574,6 +635,7 @@ def train(args):
     exp_dir = KIT_DIR / args.exp_name
     ckpt_dir = exp_dir / "checkpoints"
     traj_dir = exp_dir / "trajectories"
+    pca_dir = exp_dir / "pca_bev"
     hist_path = exp_dir / "history.json"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     traj_dir.mkdir(parents=True, exist_ok=True)
@@ -583,9 +645,23 @@ def train(args):
     print(f"train: {n_train} samples / {len(train_ids)} tars | "
           f"val: {len(val_ds)} samples / {len(val_ids)} tars | exp: {args.exp_name}")
 
-    model = AutoE2E(enable_reasoning=False, num_views=NUM_VIEWS,
-                    map_context_channels=14,
-                    route_channels=2, map_fusion_mode="deformable").to(device)
+    global ROUTE_ONLY
+    ROUTE_ONLY = args.route_only
+    if ROUTE_ONLY:
+        print("ROUTE-ONLY mode: 14-ch semantic map dropped; only 2-ch route fed "
+              "to the NavigationEncoder (in_chans=2)")
+    else:
+        print("FULL MAP mode: 14-ch semantic map + 2-ch route fed "
+              "to the NavigationEncoder (in_chans=16)")
+
+    model = AutoE2E(enable_reasoning=False, 
+                    num_views=NUM_VIEWS,
+                    map_context_channels=(0 if args.route_only else 14),
+                    route_channels=2, 
+                    map_fusion_mode="deformable",
+                    view_fusion_mode=args.view_fusion_mode,
+                    planner_mode=args.planner_mode,
+                    image_feature_size=args.image_feature_size).to(device)
     # Warm start: transfer weights from a prior run with strict=False so a
     # slightly different architecture still loads; dropped/extra keys are logged.
     if not args.no_init:
@@ -620,8 +696,8 @@ def train(args):
     for epoch in range(args.epochs):
         print(f"\n=== EPOCH {epoch + 1}/{args.epochs} ===")
         train_avg, route_terms_sum, step = train_epoch(
-            epoch + 1, model, train_ds, opt, sched, lfn, route_lfn, device,
-            args, step, traj_dir, t_start,
+            epoch + 1, model, train_ds, val_ds, opt, sched, lfn, route_lfn, device,
+            args, step, traj_dir, pca_dir, t_start,
         )
 
         # Epoch summary: mean train loss + val loss/ADE/FDE at both horizons.
@@ -643,6 +719,10 @@ def train(args):
                   f"heading {route_terms_sum['heading']:.4f} "
                   f"eligible {route_terms_sum['eligible_count']:.0f}/"
                   f"{route_terms_sum['candidate_count']:.0f}")
+        # Per-epoch fused-BEV PCA visualization (before pooling).
+        if args.pca_samples > 0:
+            _save_pca_bev(model, val_ds, device, pca_dir, tag=f"epoch_{epoch+1:03d}",
+                          n_samples=args.pca_samples)
         # Best checkpoint = lowest 6.4 s val ADE; latest = most recent epoch.
         if vac["ade"] < best_ade:
             best_ade = vac["ade"]
@@ -683,6 +763,24 @@ def main():
                     help="checkpoint to initialize from")
     ap.add_argument("--route-consistency-weight", type=float, default=0.10,
                     help="weight of the RouteConsistencyLoss term (0 disables)")
+    ap.add_argument("--route-only", action="store_true", default=True,
+                    help="drop the 14-ch semantic map; feed only the 2-ch route "
+                         "raster to the NavigationEncoder (in_chans=2) (default: True)")
+    ap.add_argument("--full-map", dest="route_only", action="store_false",
+                    help="use full 14-ch semantic map + 2-ch route raster (in_chans=16)")
+    ap.add_argument("--pca-samples", type=int, default=3,
+                    help="per-epoch PCA-BEV visualization samples (0 disables)")
+    ap.add_argument("--image-feature-size", type=int, default=32,
+                    help="per-view pooled feature resolution fed to BEV fusion "
+                         "(8 was the previous default; 32 keeps spatial detail)")
+    ap.add_argument("--view-fusion-mode", type=str, default="simple_bev",
+                    choices=["simple_bev", "bev"],
+                    help="camera BEV view fusion mode ('simple_bev' for dense voxel unprojection, "
+                         "'bev' for sparse spatial attention queries)")
+    ap.add_argument("--planner-mode", type=str, default="query",
+                    choices=["query", "bezier", "flow_matching"],
+                    help="trajectory planner mode ('query' for spatial cross-attention query planner, "
+                         "'bezier' for legacy Bernstein MLP, 'flow_matching' for JEPA/diffusion)")
     train(ap.parse_args())
 
 

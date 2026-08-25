@@ -29,7 +29,7 @@ sys.path.insert(0, str(_MODEL_DIR))
 
 from data_parsing.kit_scenes import KitScenesDataset
 
-DATA_ROOT = Path(__file__).parent / "exp-1-subset" / "data" / "train"
+DATA_ROOT = Path(__file__).parent / "datasets" / "train"
 
 DELETABLE = [
     "lidar_corner_left", "lidar_corner_right", "lidar_front", "lidar_left",
