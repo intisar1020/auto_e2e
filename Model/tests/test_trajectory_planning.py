@@ -19,6 +19,7 @@ def make_inputs(batch_size, num_views, device, include_camera_params=False):
         return visual, map_input, visual_history, egomotion, camera_params
     return visual, map_input, visual_history, egomotion
 
+
 # ---------------------------------------------------------------------------
 # Planner registry / Flow Matching planner / backcompat
 # ---------------------------------------------------------------------------
@@ -28,6 +29,8 @@ class TestPlannerRegistry:
     def test_all_modes_registered(self):
         assert "bezier" in PLANNER_REGISTRY
         assert "flow_matching" in PLANNER_REGISTRY
+        assert "gru" in PLANNER_REGISTRY
+        assert "query" in PLANNER_REGISTRY
 
     def test_invalid_mode_raises(self):
         with pytest.raises(ValueError, match="Unknown planner_mode"):
@@ -89,8 +92,9 @@ class TestFlowMatchingPlanner:
 
         v_a = self._v_theta(planner, bev_a, vis_hist, ego, u_t, t)
         v_b = self._v_theta(planner, bev_b, vis_hist, ego, u_t, t)
-        assert not torch.allclose(v_a, v_b, atol=1e-5), \
+        assert not torch.allclose(v_a, v_b, atol=1e-5), (
             "v_theta is not sensitive to BEV features"
+        )
 
     def test_velocity_depends_on_timestep(self, device):
         torch.manual_seed(0)
@@ -101,12 +105,15 @@ class TestFlowMatchingPlanner:
         ego = torch.randn(1, 256, device=device)
         u_t = torch.randn(1, 128, device=device)
 
-        v_t1 = self._v_theta(planner, bev, vis_hist, ego, u_t,
-                             torch.tensor([0.1], device=device))
-        v_t2 = self._v_theta(planner, bev, vis_hist, ego, u_t,
-                             torch.tensor([0.9], device=device))
-        assert not torch.allclose(v_t1, v_t2, atol=1e-5), \
+        v_t1 = self._v_theta(
+            planner, bev, vis_hist, ego, u_t, torch.tensor([0.1], device=device)
+        )
+        v_t2 = self._v_theta(
+            planner, bev, vis_hist, ego, u_t, torch.tensor([0.9], device=device)
+        )
+        assert not torch.allclose(v_t1, v_t2, atol=1e-5), (
             "v_theta is not sensitive to flow timestep"
+        )
 
     def test_velocity_depends_on_conditioning(self, device):
         torch.manual_seed(0)
@@ -117,19 +124,24 @@ class TestFlowMatchingPlanner:
         t = torch.tensor([0.5], device=device)
 
         v_a = self._v_theta(
-            planner, bev,
+            planner,
+            bev,
             torch.randn(1, 896, device=device),
             torch.randn(1, 256, device=device),
-            u_t, t,
+            u_t,
+            t,
         )
         v_b = self._v_theta(
-            planner, bev,
+            planner,
+            bev,
             torch.randn(1, 896, device=device),
             torch.randn(1, 256, device=device),
-            u_t, t,
+            u_t,
+            t,
         )
-        assert not torch.allclose(v_a, v_b, atol=1e-5), \
+        assert not torch.allclose(v_a, v_b, atol=1e-5), (
             "v_theta is not sensitive to ego/visual_history conditioning"
+        )
 
     def test_inference_differs_from_noise(self, device):
         """Euler integration must actually transform the noise — output
@@ -145,8 +157,9 @@ class TestFlowMatchingPlanner:
         x0 = torch.randn(1, 128, device=device)
         torch.manual_seed(123)  # same seed — planner draws an identical x0 inside
         traj = planner(bev, vis_hist, ego)
-        assert not torch.allclose(traj, x0, atol=1e-3), \
+        assert not torch.allclose(traj, x0, atol=1e-3), (
             "Inference output equals the input noise — ODE did not advance"
+        )
 
     def test_gradient_flows(self, device):
         """Gradients from the integrated trajectory must reach the BEV input
@@ -178,10 +191,12 @@ class TestFlowMatchingPlanner:
         traj_b = planner(bev, vis_hist, ego, generator=gen_b)
         traj_c = planner(bev, vis_hist, ego, generator=gen_c)
 
-        assert torch.equal(traj_a, traj_b), \
+        assert torch.equal(traj_a, traj_b), (
             "same generator seed must produce identical inference trajectories"
-        assert not torch.allclose(traj_a, traj_c), \
+        )
+        assert not torch.allclose(traj_a, traj_c), (
             "different generator seeds must produce different trajectories"
+        )
 
     def test_initial_noise_is_independent_of_rng_state(self, device):
         planner = FlowMatchingPlanner(embed_dim=256, num_inference_steps=4).to(device)
@@ -193,11 +208,17 @@ class TestFlowMatchingPlanner:
 
         torch.manual_seed(1)
         traj_a = planner(
-            bev, vis_hist, ego, initial_noise=initial_noise,
+            bev,
+            vis_hist,
+            ego,
+            initial_noise=initial_noise,
         )
         torch.manual_seed(999)
         traj_b = planner(
-            bev, vis_hist, ego, initial_noise=initial_noise,
+            bev,
+            vis_hist,
+            ego,
+            initial_noise=initial_noise,
         )
 
         assert torch.equal(traj_a, traj_b)
@@ -212,7 +233,10 @@ class TestFlowMatchingPlanner:
         order = torch.tensor([2, 0, 1], device=device)
 
         original = planner(
-            bev, vis_hist, ego, initial_noise=initial_noise,
+            bev,
+            vis_hist,
+            ego,
+            initial_noise=initial_noise,
         )
         reordered = planner(
             bev[order],
@@ -231,14 +255,21 @@ class TestFlowMatchingPlanner:
 
         with pytest.raises(ValueError, match="initial_noise must have shape"):
             planner(
-                bev, vis_hist, ego,
+                bev,
+                vis_hist,
+                ego,
                 initial_noise=torch.randn(2, 64, device=device),
             )
         with pytest.raises(ValueError, match="same dtype"):
             planner(
-                bev, vis_hist, ego,
+                bev,
+                vis_hist,
+                ego,
                 initial_noise=torch.randn(
-                    2, 128, device=device, dtype=torch.float64,
+                    2,
+                    128,
+                    device=device,
+                    dtype=torch.float64,
                 ),
             )
 
@@ -246,7 +277,9 @@ class TestFlowMatchingPlanner:
         """The internal _validate_flow_inputs guard must catch shape regressions
         even when the user only calls construct_training_data."""
         planner = FlowMatchingPlanner(
-            embed_dim=256, num_timesteps=4, num_signals=2,
+            embed_dim=256,
+            num_timesteps=4,
+            num_signals=2,
         ).to(device)
         # construct_training_data uses target's shape verbatim; if that shape
         # disagrees with planner.trajectory_dim, the internal validator fires.
@@ -260,20 +293,22 @@ class TestFlowMatchingPlanner:
         good_t = torch.rand(2, device=device)
         # Wrong u_t shape
         with pytest.raises(ValueError, match="noisy_trajectory must have shape"):
-            planner._validate_flow_inputs(torch.randn(2, 64, device=device),
-                                          good_t, batch_size=2)
+            planner._validate_flow_inputs(
+                torch.randn(2, 64, device=device), good_t, batch_size=2
+            )
         # Wrong t shape
         with pytest.raises(ValueError, match="flow_timestep must have shape"):
-            planner._validate_flow_inputs(good_u,
-                                          torch.rand(3, device=device),
-                                          batch_size=2)
+            planner._validate_flow_inputs(
+                good_u, torch.rand(3, device=device), batch_size=2
+            )
         # Dtype mismatch
         good_u_f64 = good_u.to(torch.float64)
         with pytest.raises(ValueError, match="must share dtype"):
             planner._validate_flow_inputs(good_u_f64, good_t, batch_size=2)
 
-    @pytest.mark.skipif(not torch.cuda.is_available(),
-                        reason="device-mismatch case requires CUDA")
+    @pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="device-mismatch case requires CUDA"
+    )
     def test_validate_flow_inputs_device_mismatch(self):
         planner = FlowMatchingPlanner(embed_dim=256)
         u_cpu = torch.randn(1, 128)
@@ -306,7 +341,8 @@ class TestFlowMatchingPlanner:
     def test_timestep_sampler_uniform_option(self, device):
         """timestep_sampler='uniform' recovers U(0, 1)."""
         planner = FlowMatchingPlanner(
-            embed_dim=256, timestep_sampler="uniform",
+            embed_dim=256,
+            timestep_sampler="uniform",
         ).to(device)
         target = torch.randn(256, 128, device=device)
         _, t, _ = planner.construct_training_data(target)
@@ -324,12 +360,12 @@ class TestFlowMatchingPlanner:
             FlowMatchingPlanner(beta_scale=1.5)
 
 
-
 class TestAutoE2EWithFlowMatching:
     @staticmethod
     def _fm_model(build_mock_model, device):
         return build_mock_model(
-            num_views=8, device=device,
+            num_views=8,
+            device=device,
             planner_mode="flow_matching",
             planner_kwargs={"num_inference_steps": 4},
         )
@@ -359,13 +395,21 @@ class TestAutoE2EWithFlowMatching:
 
         torch.manual_seed(1)
         traj_a = model(
-            visual, map_input, vis_hist, ego,
-            mode="infer", initial_noise=initial_noise,
+            visual,
+            map_input,
+            vis_hist,
+            ego,
+            mode="infer",
+            initial_noise=initial_noise,
         )
         torch.manual_seed(999)
         traj_b = model(
-            visual, map_input, vis_hist, ego,
-            mode="infer", initial_noise=initial_noise,
+            visual,
+            map_input,
+            vis_hist,
+            ego,
+            mode="infer",
+            initial_noise=initial_noise,
         )
 
         assert torch.equal(traj_a, traj_b)
@@ -393,8 +437,9 @@ class TestAutoE2EWithFlowMatching:
     def test_bezier_and_fm_interchangeable_at_inference(self, build_mock_model, device):
         """Bezier and Flow Matching both produce a [B, T*S] trajectory in
         inference mode — callers can swap planners with no other code changes."""
-        bezier_model = build_mock_model(num_views=8, device=device,
-                                        planner_mode="bezier")
+        bezier_model = build_mock_model(
+            num_views=8, device=device, planner_mode="bezier"
+        )
         fm_model = self._fm_model(build_mock_model, device)
         bezier_model.eval()
         fm_model.eval()

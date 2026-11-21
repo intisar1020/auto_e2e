@@ -10,6 +10,8 @@ recipe while avoiding the packed WebDataset and Ray infrastructure:
   reconstructed with the same contracts used by production training;
 * the trajectory XY and route reconstruction objectives are reused;
 * GRU and query planners both start from freshly initialized planner weights;
+* the query planner is the PAD-derived implementation from
+  ``model_components.trajectory_planning.pad_query_planner``;
 * only the planner architecture differs between the two runs.
 
 The local subset is useful for comparing planners, not for reproducing the full
@@ -55,8 +57,10 @@ for import_root in (REPO_ROOT, MODEL_ROOT):
 
 from data_parsing.kit_scenes import KitScenesDataset  # noqa: E402
 from model_components.auto_e2e import AutoE2E  # noqa: E402
-from model_components.trajectory_planning import GRUPlanner  # noqa: E402
-from model_components.trajectory_planning.base import BasePlanner  # noqa: E402
+from model_components.trajectory_planning import (  # noqa: E402
+    GRUPlanner,
+    PadQueryPlanner,
+)
 from model_components.view_fusion.projection import (  # noqa: E402
     PinholeProjection,
 )
@@ -299,421 +303,6 @@ def _scene_split(
     return training, validation
 
 
-def _kmedoid_anchors(
-    control_targets: torch.Tensor,
-    integrated_xy: torch.Tensor,
-    num_modes: int,
-) -> torch.Tensor:
-    """Pick representative real training trajectories as mode anchors."""
-    if control_targets.shape[0] < num_modes:
-        raise ValueError("not enough training samples for requested modes")
-    features = integrated_xy.reshape(integrated_xy.shape[0], -1)
-    mean = features.mean(dim=0, keepdim=True)
-    std = features.std(dim=0, keepdim=True, unbiased=False).clamp_min(1e-6)
-    standardized = (features - mean) / std
-
-    selected = [
-        int(torch.argmin((standardized - standardized.mean(0)).square().sum(1)))
-    ]
-    while len(selected) < num_modes:
-        distances = torch.cdist(standardized, standardized[selected])
-        nearest = distances.min(dim=1).values
-        nearest[selected] = -1.0
-        selected.append(int(nearest.argmax()))
-
-    centers = standardized[selected].clone()
-    for _ in range(20):
-        distances = torch.cdist(standardized, centers)
-        new_labels = distances.argmin(dim=1)
-        updated = []
-        for mode in range(num_modes):
-            members = torch.nonzero(
-                new_labels == mode,
-                as_tuple=False,
-            ).flatten()
-            if members.numel() == 0:
-                updated.append(selected[mode])
-                continue
-            center = standardized[members].mean(dim=0)
-            local = (standardized[members] - center).square().sum(1)
-            updated.append(int(members[int(local.argmin())]))
-        updated_tensor = torch.tensor(updated, dtype=torch.long)
-        if torch.equal(updated_tensor, torch.tensor(selected)):
-            break
-        selected = updated
-        centers = standardized[selected].clone()
-
-    # Stable ordering makes repeated runs easier to compare.
-    selected = sorted(selected)
-    modes_by_lateral = [
-        (
-            float(integrated_xy[index, :, 1].mean()),
-            int(index),
-        )
-        for index in selected
-    ]
-    selected = [index for _, index in sorted(modes_by_lateral)]
-    return control_targets[selected].clone()
-
-
-@torch.no_grad()
-def _build_anchors(
-    dataset: LocalKITScenesDataset,
-    *,
-    num_modes: int,
-    max_samples: int,
-) -> torch.Tensor:
-    controls: list[torch.Tensor] = []
-    trajectories: list[torch.Tensor] = []
-    sample_count = min(len(dataset), max_samples)
-    if sample_count < num_modes:
-        raise ValueError(
-            f"need at least {num_modes} anchor samples, found {sample_count}"
-        )
-    for idx in range(sample_count):
-        target, initial_speed = dataset.behavior_target(idx)
-        positions, _, _ = integrate_controls_torch(
-            target.unsqueeze(0),
-            torch.tensor([initial_speed], dtype=torch.float32),
-        )
-        controls.append(target)
-        trajectories.append(positions[0])
-    anchors = _kmedoid_anchors(
-        torch.stack(controls),
-        torch.stack(trajectories),
-        num_modes,
-    )
-    print(f"Built {anchors.shape[0]} mode anchors from {len(dataset)} training samples")
-    return anchors
-
-
-def _bev_grid_coordinates(
-    xy_m: torch.Tensor,
-    pc_range: Sequence[float],
-) -> torch.Tensor:
-    """Map ego-frame XY to ``grid_sample`` coordinates.
-
-    KITScenes raster rows run front-to-rear and columns left-to-right. PyTorch
-    grid coordinates are ``(x=column, y=row)``.
-    """
-    x_min, y_min, _, x_max, y_max, _ = pc_range
-    x = xy_m[..., 0]
-    y = xy_m[..., 1]
-    column = (y_max - y) / (y_max - y_min)
-    row = (x_max - x) / (x_max - x_min)
-    return torch.stack([2.0 * column - 1.0, 2.0 * row - 1.0], dim=-1)
-
-
-class _ModeQueryLayer(nn.Module):
-    """Refine all mode control trajectories with trajectory-anchored queries."""
-
-    def __init__(
-        self,
-        embed_dim: int,
-        num_points: int,
-        num_heads: int = 8,
-        offset_scale: float = 0.05,
-        dropout: float = 0.1,
-    ) -> None:
-        super().__init__()
-        self.num_points = num_points
-        self.offset_scale = offset_scale
-        self.sampling_offsets = nn.Linear(
-            embed_dim,
-            num_points * 2,
-        )
-        self.attention_weights = nn.Linear(embed_dim, num_points)
-        self.bev_output_proj = nn.Linear(embed_dim, embed_dim)
-        self.time_attention = nn.MultiheadAttention(
-            embed_dim,
-            num_heads,
-            dropout=dropout,
-            batch_first=True,
-        )
-        self.mode_attention = nn.MultiheadAttention(
-            embed_dim,
-            num_heads,
-            dropout=dropout,
-            batch_first=True,
-        )
-        self.ffn = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim * 4),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(embed_dim * 4, embed_dim),
-        )
-        self.norm_bev = nn.LayerNorm(embed_dim)
-        self.norm_time = nn.LayerNorm(embed_dim)
-        self.norm_mode = nn.LayerNorm(embed_dim)
-        self.norm_ffn = nn.LayerNorm(embed_dim)
-        self.control_head = nn.Linear(embed_dim, 2)
-        nn.init.zeros_(self.control_head.weight)
-        nn.init.zeros_(self.control_head.bias)
-
-    def forward(
-        self,
-        queries: torch.Tensor,
-        controls: torch.Tensor,
-        initial_speed: torch.Tensor,
-        bev_features: torch.Tensor,
-        pc_range: Sequence[float],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        batch_size, num_modes, num_steps, channels = queries.shape
-        values = bev_features
-
-        flat_controls = controls.reshape(
-            batch_size * num_modes,
-            num_steps,
-            2,
-        )
-        speeds = initial_speed.repeat_interleave(num_modes)
-        positions, _, _ = integrate_controls_torch(
-            flat_controls,
-            speeds,
-        )
-        positions = positions.reshape(
-            batch_size,
-            num_modes,
-            num_steps,
-            2,
-        )
-        locations = _bev_grid_coordinates(positions, pc_range)
-        offsets = self.sampling_offsets(queries).reshape(
-            batch_size,
-            num_modes,
-            num_steps,
-            self.num_points,
-            2,
-        )
-        locations = locations.unsqueeze(-2) + offsets * self.offset_scale
-        grid = locations.reshape(
-            batch_size,
-            num_modes * num_steps,
-            self.num_points,
-            2,
-        )
-        sampled = F.grid_sample(
-            values,
-            grid,
-            mode="bilinear",
-            padding_mode="zeros",
-            align_corners=False,
-        )
-        sampled = sampled.permute(0, 2, 3, 1).reshape(
-            batch_size,
-            num_modes,
-            num_steps,
-            self.num_points,
-            channels,
-        )
-        weights = self.attention_weights(queries).softmax(dim=-1)
-        attended = (sampled * weights.unsqueeze(-1)).sum(dim=-2)
-        queries = self.norm_bev(queries + self.bev_output_proj(attended))
-
-        time_queries = queries.reshape(
-            batch_size * num_modes,
-            num_steps,
-            channels,
-        )
-        time_output, _ = self.time_attention(
-            time_queries,
-            time_queries,
-            time_queries,
-            need_weights=False,
-        )
-        queries = self.norm_time(queries + time_output.reshape_as(queries))
-
-        mode_queries = queries.permute(0, 2, 1, 3).reshape(
-            batch_size * num_steps,
-            num_modes,
-            channels,
-        )
-        mode_output, _ = self.mode_attention(
-            mode_queries,
-            mode_queries,
-            mode_queries,
-            need_weights=False,
-        )
-        queries = self.norm_mode(
-            queries
-            + mode_output.reshape(
-                batch_size,
-                num_steps,
-                num_modes,
-                channels,
-            ).permute(0, 2, 1, 3)
-        )
-        queries = self.norm_ffn(queries + self.ffn(queries))
-        controls = controls + self.control_head(queries)
-        return queries, controls
-
-
-class QueryPlanner(BasePlanner):
-    """Multimodal control planner with trajectory-anchored BEV queries."""
-
-    def __init__(
-        self,
-        *,
-        controls_anchors: torch.Tensor,
-        embed_dim: int = 256,
-        num_timesteps: int = 64,
-        num_signals: int = 2,
-        num_points: int = 8,
-        egomotion_dim: int = 256,
-        visual_history_dim: int = 896,
-        num_layers: int = 2,
-        num_heads: int = 8,
-        pc_range: Sequence[float] = (
-            -60.0,
-            -60.0,
-            -5.0,
-            120.0,
-            60.0,
-            3.0,
-        ),
-    ) -> None:
-        super().__init__()
-        if num_signals != 2:
-            raise ValueError("query planner expects acceleration/curvature controls")
-        expected_anchor_shape = (
-            int(controls_anchors.shape[0]),
-            num_timesteps,
-            num_signals,
-        )
-        if tuple(controls_anchors.shape) != expected_anchor_shape:
-            raise ValueError("query planner anchors have the wrong shape")
-        self.num_modes = int(controls_anchors.shape[0])
-        self.num_timesteps = num_timesteps
-        self.num_signals = num_signals
-        self.egomotion_dim = egomotion_dim
-        self.visual_history_dim = visual_history_dim
-        self.pc_range = tuple(float(value) for value in pc_range)
-        self.register_buffer(
-            "control_anchors",
-            controls_anchors.to(dtype=torch.float32).clone(),
-        )
-        self.ego_state_proj = nn.Linear(egomotion_dim, embed_dim)
-        self.visual_history_proj = nn.Linear(visual_history_dim, embed_dim)
-        self.mode_embed = nn.Embedding(self.num_modes, embed_dim)
-        self.time_embed = nn.Embedding(num_timesteps, embed_dim)
-        self.bev_value_proj = nn.Linear(embed_dim, embed_dim)
-        self.layers = nn.ModuleList(
-            [
-                _ModeQueryLayer(
-                    embed_dim,
-                    num_points,
-                    num_heads=num_heads,
-                )
-                for _ in range(num_layers)
-            ]
-        )
-        self.score_head = nn.Linear(embed_dim, 1)
-        self.last_mode_loss: torch.Tensor | None = None
-        self.last_mode_controls: torch.Tensor | None = None
-        self.last_mode_xy: torch.Tensor | None = None
-        self.last_mode_scores: torch.Tensor | None = None
-        self.last_selected_mode: torch.Tensor | None = None
-
-    def forward(
-        self,
-        bev_features: torch.Tensor,
-        visual_history: torch.Tensor,
-        egomotion_history: torch.Tensor,
-        **kwargs: Any,
-    ) -> torch.Tensor:
-        initial_speed = kwargs.get("initial_speed_mps")
-        if not torch.is_tensor(initial_speed):
-            raise ValueError(
-                "query planner requires initial_speed_mps for trajectory anchoring"
-            )
-        target_xy = kwargs.get("trajectory_xy_m")
-        target_valid = kwargs.get("trajectory_valid")
-        batch_size = bev_features.shape[0]
-        context = self.ego_state_proj(egomotion_history) + self.visual_history_proj(
-            visual_history
-        )
-        queries = (
-            context[:, None, None, :]
-            + self.mode_embed.weight[None, :, None, :]
-            + self.time_embed.weight[None, None, :, :]
-        ).expand(
-            batch_size,
-            self.num_modes,
-            self.num_timesteps,
-            context.shape[-1],
-        )
-        controls = self.control_anchors[None].expand(
-            batch_size,
-            -1,
-            -1,
-            -1,
-        )
-        values = (
-            self.bev_value_proj(bev_features.permute(0, 2, 3, 1))
-            .permute(0, 3, 1, 2)
-            .contiguous()
-        )
-        initial_speed = initial_speed.to(
-            device=bev_features.device,
-            dtype=bev_features.dtype,
-        )
-
-        for layer in self.layers:
-            queries, controls = layer(
-                queries,
-                controls,
-                initial_speed,
-                values,
-                self.pc_range,
-            )
-
-        flat_controls = controls.reshape(
-            batch_size * self.num_modes,
-            self.num_timesteps,
-            self.num_signals,
-        )
-        mode_xy, _, _ = integrate_controls_torch(
-            flat_controls,
-            initial_speed.repeat_interleave(self.num_modes),
-        )
-        mode_xy = mode_xy.reshape(
-            batch_size,
-            self.num_modes,
-            self.num_timesteps,
-            2,
-        )
-        scores = self.score_head(queries.mean(dim=2)).squeeze(-1)
-
-        self.last_mode_loss = None
-        if torch.is_tensor(target_xy) and torch.is_tensor(target_valid):
-            target_xy = target_xy.to(device=mode_xy.device, dtype=mode_xy.dtype)
-            target_valid = target_valid.to(
-                device=mode_xy.device,
-                dtype=torch.bool,
-            )
-            error = torch.linalg.vector_norm(
-                mode_xy - target_xy[:, None],
-                dim=-1,
-            )
-            mask = target_valid[:, None, :].to(dtype=error.dtype)
-            mean_error = (error * mask).sum(dim=-1) / mask.sum(dim=-1).clamp_min(1.0)
-            selected = mean_error.argmin(dim=1)
-            self.last_mode_loss = F.cross_entropy(scores, selected)
-        else:
-            selected = scores.argmax(dim=1)
-
-        rows = torch.arange(batch_size, device=bev_features.device)
-        selected_controls = controls[rows, selected]
-        self.last_mode_controls = controls.detach()
-        self.last_mode_xy = mode_xy.detach()
-        self.last_mode_scores = scores.detach()
-        self.last_selected_mode = selected.detach()
-        return selected_controls.reshape(
-            batch_size,
-            self.num_timesteps * self.num_signals,
-        )
-
-
 def _load_checkpoint_model(
     checkpoint_path: Path,
     device: torch.device,
@@ -739,7 +328,7 @@ def _replace_planner(
     model: AutoE2E,
     planner_name: str,
     *,
-    anchors: torch.Tensor | None,
+    num_proposals: int,
     pc_range: Sequence[float],
 ) -> None:
     if planner_name == "gru":
@@ -752,18 +341,16 @@ def _replace_planner(
             visual_history_dim=896,
         )
     elif planner_name == "query":
-        if anchors is None:
-            raise ValueError("query planner requires anchors")
-        planner = QueryPlanner(
-            controls_anchors=anchors,
+        planner = PadQueryPlanner(
             embed_dim=256,
             num_timesteps=64,
             num_signals=2,
-            num_points=8,
+            num_proposals=num_proposals,
+            num_refinement_steps=4,
+            num_bev_points=8,
+            num_heads=8,
             egomotion_dim=256,
             visual_history_dim=896,
-            num_layers=2,
-            num_heads=8,
             pc_range=pc_range,
         )
     else:
@@ -892,7 +479,7 @@ def _train_one_epoch(
     gradient_accumulation: int,
     grad_clip: float,
     precision: str,
-    mode_loss_weight: float,
+    query_loss_weight: float,
     log_every: int,
     steps_per_epoch: int,
     max_steps: int,
@@ -920,18 +507,20 @@ def _train_one_epoch(
             )
             terms = objective(controls, auxiliary, batch)
             loss = terms["total"]
-            mode_loss = controls.new_zeros(())
+            query_loss = controls.new_zeros(())
             planner = model.Reactive_E2E.TrajectoryPlanner
-            if isinstance(planner, QueryPlanner):
-                if not torch.is_tensor(planner.last_mode_loss):
-                    raise RuntimeError("query planner did not produce mode loss")
-                mode_loss = planner.last_mode_loss
-                loss = loss + mode_loss_weight * mode_loss
+            if isinstance(planner, PadQueryPlanner):
+                if not torch.is_tensor(planner.last_aux_loss):
+                    raise RuntimeError(
+                        "PAD query planner did not produce auxiliary loss"
+                    )
+                query_loss = planner.last_aux_loss
+                loss = loss + query_loss_weight * query_loss
         (loss / gradient_accumulation).backward()
         totals["loss"] += float(loss.detach())
         totals["trajectory"] += float(terms["trajectory"].detach())
         totals["route"] += float(terms["route_reconstruction"].detach())
-        totals["mode"] += float(mode_loss.detach())
+        totals["query"] += float(query_loss.detach())
         micro_steps += 1
         samples_seen += int(batch["visual_tiles"].shape[0])
 
@@ -956,7 +545,7 @@ def _train_one_epoch(
                 f"step={completed_steps} "
                 f"loss={totals['loss'] / micro_steps:.5f} "
                 f"route={totals['route'] / micro_steps:.5f} "
-                f"mode={totals['mode'] / micro_steps:.5f} "
+                f"query={totals['query'] / micro_steps:.5f} "
                 f"samples/s={samples_seen / max(elapsed, 1e-6):.3f}",
                 flush=True,
             )
@@ -1002,7 +591,7 @@ def _validate(
 ) -> dict[str, Any]:
     model.eval()
     records: list[dict[str, Any]] = []
-    mode_histogram: Counter[int] = Counter()
+    proposal_histogram: Counter[int] = Counter()
     for raw_batch in loader:
         batch = _move_batch(raw_batch, device)
         with torch.autocast(
@@ -1028,12 +617,13 @@ def _validate(
             dim=-1,
         )
         planner = model.Reactive_E2E.TrajectoryPlanner
-        if isinstance(planner, QueryPlanner):
-            if planner.last_selected_mode is not None:
-                mode_histogram.update(
-                    int(value) for value in planner.last_selected_mode.cpu().tolist()
+        if isinstance(planner, PadQueryPlanner):
+            if planner.last_selected_proposal is not None:
+                proposal_histogram.update(
+                    int(value)
+                    for value in planner.last_selected_proposal.cpu().tolist()
                 )
-            candidate_xy = planner.last_mode_xy
+            candidate_xy = planner.last_proposal_xy
         else:
             candidate_xy = None
 
@@ -1095,8 +685,8 @@ def _validate(
     ]
     if min_ade:
         metrics["min_ade_6p4s_m"] = _mean(min_ade)
-        metrics["mode_selection_histogram"] = {
-            str(key): value for key, value in sorted(mode_histogram.items())
+        metrics["proposal_selection_histogram"] = {
+            str(key): value for key, value in sorted(proposal_histogram.items())
         }
 
     by_scene: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -1206,8 +796,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--precision", choices=("bf16", "fp32"), default="bf16")
     parser.add_argument("--seed", type=int, default=149)
-    parser.add_argument("--num-modes", type=int, default=8)
-    parser.add_argument("--mode-loss-weight", type=float, default=0.1)
+    parser.add_argument("--num-proposals", type=int, default=16)
+    parser.add_argument("--query-loss-weight", type=float, default=1.0)
     parser.add_argument(
         "--train-limit",
         type=int,
@@ -1294,17 +884,6 @@ def main() -> None:
         f"validation={len(validation_dataset)}"
     )
 
-    anchors = (
-        _build_anchors(
-            train_dataset,
-            num_modes=args.num_modes,
-            max_samples=(
-                args.train_limit if args.train_limit > 0 else len(train_dataset)
-            ),
-        )
-        if args.planner == "query"
-        else None
-    )
     # Data/model setup above does not define the architecture comparison.
     # Reseed before creating the fresh planner so both planner runs begin from
     # the same reproducible initialization stream.
@@ -1313,7 +892,7 @@ def main() -> None:
         _replace_planner(
             model,
             args.planner,
-            anchors=anchors,
+            num_proposals=args.num_proposals,
             pc_range=pc_range,
         )
         model.Reactive_E2E.TrajectoryPlanner.to(device)
@@ -1393,8 +972,8 @@ def main() -> None:
         "grad_clip": args.grad_clip,
         "precision": args.precision,
         "seed": args.seed,
-        "num_modes": args.num_modes,
-        "mode_loss_weight": args.mode_loss_weight,
+        "num_proposals": args.num_proposals,
+        "query_loss_weight": args.query_loss_weight,
         "checkpoint_architecture": checkpoint_config["model_architecture_version"],
         "trainable_parameter_count": sum(
             parameter.numel() for parameter in trainable_parameters
@@ -1441,7 +1020,7 @@ def main() -> None:
             gradient_accumulation=args.gradient_accumulation,
             grad_clip=args.grad_clip,
             precision=args.precision,
-            mode_loss_weight=args.mode_loss_weight,
+            query_loss_weight=args.query_loss_weight,
             log_every=args.log_every,
             steps_per_epoch=args.steps_per_epoch,
             max_steps=args.max_steps,

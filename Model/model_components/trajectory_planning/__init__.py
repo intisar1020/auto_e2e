@@ -2,12 +2,15 @@ from .base import BasePlanner
 from .flow_matching_planner import FlowMatchingPlanner
 from .bezier_planner import BezierPlanner
 from .gru_planner import GRUPlanner
+from .pad_query_planner import PadQueryPlanner
 
 PLANNER_REGISTRY = {
     "flow_matching": FlowMatchingPlanner,
     "bezier": BezierPlanner,
     "gru": GRUPlanner,
+    "query": PadQueryPlanner,
 }
+
 
 def build_planner(planner_mode, **kwargs):
     """Construct a planner by name.
@@ -28,19 +31,23 @@ def build_planner(planner_mode, **kwargs):
         # model to the conditional mean. No training path computes the
         # flow-matching velocity objective yet.
         import warnings
+
         warnings.warn(
             "planner_mode='flow_matching' is NOT correctly trainable via the "
             "current train_il loop (it L1-regresses an Euler-from-noise rollout, "
             "not the velocity-MSE flow objective). Use 'bezier' unless/until "
             "compute_planner_loss is wired in.",
-            RuntimeWarning, stacklevel=2,
+            RuntimeWarning,
+            stacklevel=2,
         )
     return PLANNER_REGISTRY[planner_mode](**kwargs)
+
 
 __all__ = [
     "BasePlanner",
     "FlowMatchingPlanner",
     "GRUPlanner",
+    "PadQueryPlanner",
     "BezierPlanner",
     "PLANNER_REGISTRY",
     "build_planner",
