@@ -122,6 +122,10 @@ def test_training_losses_and_gradients_reach_bev() -> None:
     assert planner.last_score_loss is not None
     assert planner.last_diversity_loss is not None
     assert torch.isfinite(planner.last_aux_loss)
+    assert planner.last_aux_loss >= 0
+    assert planner.last_proposal_loss >= 0
+    assert planner.last_score_loss >= 0
+    assert planner.last_diversity_loss >= 0
     loss = output.square().mean() + planner.last_aux_loss
     loss.backward()
     assert bev.grad is not None and bev.grad.abs().sum() > 0

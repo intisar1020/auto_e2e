@@ -282,6 +282,7 @@ class PadQueryPlanner(BasePlanner):
         offset_scale: float = 0.05,
         dropout: float = 0.1,
         score_temperature_m: float = 1.0,
+        diversity_margin_m: float = 0.25,
         previous_refinement_weight: float = 0.1,
         diversity_weight: float = 0.1,
         proposal_loss_weight: float = 1.0,
@@ -308,6 +309,8 @@ class PadQueryPlanner(BasePlanner):
             raise ValueError("PAD query planner dimensions must be positive")
         if score_temperature_m <= 0.0:
             raise ValueError("score_temperature_m must be positive")
+        if diversity_margin_m < 0.0:
+            raise ValueError("diversity_margin_m must be non-negative")
         if reasoning_mode != "none":
             raise ValueError("PAD query planner currently supports no reasoning")
         self.embed_dim = int(embed_dim)
@@ -319,6 +322,7 @@ class PadQueryPlanner(BasePlanner):
         self.visual_history_dim = int(visual_history_dim)
         self.pc_range = tuple(float(value) for value in pc_range)
         self.score_temperature_m = float(score_temperature_m)
+        self.diversity_margin_m = float(diversity_margin_m)
         self.previous_refinement_weight = float(previous_refinement_weight)
         self.diversity_weight = float(diversity_weight)
         self.proposal_loss_weight = float(proposal_loss_weight)
@@ -373,7 +377,7 @@ class PadQueryPlanner(BasePlanner):
             minimum = per_proposal.min(dim=1).values.mean()
 
             flat = xy.reshape(xy.shape[0], xy.shape[1], -1)
-            distances = torch.cdist(flat, flat, p=1)
+            distances = torch.cdist(flat, flat, p=1) / (self.num_timesteps * 2)
             distances = (
                 distances
                 + torch.eye(
@@ -383,7 +387,12 @@ class PadQueryPlanner(BasePlanner):
                 )[None]
                 * 1e6
             )
-            diversity = -distances.min(dim=2).values.mean()
+            # Upstream PAD maximizes proposal separation with an unbounded
+            # negative term. Use a non-negative margin penalty so diversity is
+            # encouraged only until proposals are sufficiently distinct.
+            diversity = F.relu(
+                self.diversity_margin_m - distances.min(dim=2).values
+            ).mean()
             total = (
                 self.previous_refinement_weight * total
                 + minimum

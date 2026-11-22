@@ -508,6 +508,9 @@ def _train_one_epoch(
             terms = objective(controls, auxiliary, batch)
             loss = terms["total"]
             query_loss = controls.new_zeros(())
+            query_proposal_loss = controls.new_zeros(())
+            query_score_loss = controls.new_zeros(())
+            query_diversity_loss = controls.new_zeros(())
             planner = model.Reactive_E2E.TrajectoryPlanner
             if isinstance(planner, PadQueryPlanner):
                 if not torch.is_tensor(planner.last_aux_loss):
@@ -515,12 +518,21 @@ def _train_one_epoch(
                         "PAD query planner did not produce auxiliary loss"
                     )
                 query_loss = planner.last_aux_loss
+                if torch.is_tensor(planner.last_proposal_loss):
+                    query_proposal_loss = planner.last_proposal_loss
+                if torch.is_tensor(planner.last_score_loss):
+                    query_score_loss = planner.last_score_loss
+                if torch.is_tensor(planner.last_diversity_loss):
+                    query_diversity_loss = planner.last_diversity_loss
                 loss = loss + query_loss_weight * query_loss
         (loss / gradient_accumulation).backward()
         totals["loss"] += float(loss.detach())
         totals["trajectory"] += float(terms["trajectory"].detach())
         totals["route"] += float(terms["route_reconstruction"].detach())
         totals["query"] += float(query_loss.detach())
+        totals["query_proposal"] += float(query_proposal_loss.detach())
+        totals["query_score"] += float(query_score_loss.detach())
+        totals["query_diversity"] += float(query_diversity_loss.detach())
         micro_steps += 1
         samples_seen += int(batch["visual_tiles"].shape[0])
 
@@ -546,6 +558,9 @@ def _train_one_epoch(
                 f"loss={totals['loss'] / micro_steps:.5f} "
                 f"route={totals['route'] / micro_steps:.5f} "
                 f"query={totals['query'] / micro_steps:.5f} "
+                f"proposal={totals['query_proposal'] / micro_steps:.5f} "
+                f"score={totals['query_score'] / micro_steps:.5f} "
+                f"diversity={totals['query_diversity'] / micro_steps:.5f} "
                 f"samples/s={samples_seen / max(elapsed, 1e-6):.3f}",
                 flush=True,
             )
@@ -779,8 +794,8 @@ def _parse_args() -> argparse.Namespace:
         default=REPO_ROOT / "local_training" / "runs",
     )
     parser.add_argument("--run-name", default="")
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--batch-size", type=int, default=3)
     parser.add_argument("--gradient-accumulation", type=int, default=16)
     parser.add_argument(
         "--log-every",
