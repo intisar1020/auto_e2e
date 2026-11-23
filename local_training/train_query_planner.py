@@ -303,6 +303,76 @@ def _scene_split(
     return training, validation
 
 
+@torch.no_grad()
+def _build_anchor_controls(
+    dataset: LocalKITScenesDataset,
+    *,
+    num_proposals: int,
+) -> torch.Tensor:
+    """Choose representative expert control trajectories from the train split."""
+    if len(dataset) < num_proposals:
+        raise ValueError(
+            "the training split needs at least one sample per proposal anchor"
+        )
+    controls: list[torch.Tensor] = []
+    trajectories: list[torch.Tensor] = []
+    for index in range(len(dataset)):
+        target, initial_speed = dataset.behavior_target(index)
+        xy, _, _ = integrate_controls_torch(
+            target.unsqueeze(0),
+            torch.tensor([initial_speed], dtype=torch.float32),
+        )
+        controls.append(target)
+        trajectories.append(xy[0])
+    control_targets = torch.stack(controls)
+    features = torch.stack(trajectories).reshape(len(dataset), -1)
+    standardized = (features - features.mean(dim=0, keepdim=True)) / features.std(
+        dim=0, keepdim=True, unbiased=False
+    ).clamp_min(1e-6)
+
+    selected = [
+        int((standardized - standardized.mean(dim=0)).square().sum(dim=1).argmin())
+    ]
+    while len(selected) < num_proposals:
+        nearest = (
+            torch.cdist(
+                standardized,
+                standardized[selected],
+            )
+            .min(dim=1)
+            .values
+        )
+        nearest[selected] = -1.0
+        selected.append(int(nearest.argmax()))
+
+    centers = standardized[selected].clone()
+    for _ in range(20):
+        labels = torch.cdist(standardized, centers).argmin(dim=1)
+        updated: list[int] = []
+        for proposal in range(num_proposals):
+            members = torch.nonzero(
+                labels == proposal,
+                as_tuple=False,
+            ).flatten()
+            if members.numel() == 0:
+                updated.append(selected[proposal])
+                continue
+            center = standardized[members].mean(dim=0)
+            updated.append(
+                int(
+                    members[
+                        (standardized[members] - center).square().sum(dim=1).argmin()
+                    ]
+                )
+            )
+        if updated == selected:
+            break
+        selected = updated
+        centers = standardized[selected].clone()
+
+    return control_targets[sorted(selected)].clone()
+
+
 def _load_checkpoint_model(
     checkpoint_path: Path,
     device: torch.device,
@@ -329,6 +399,7 @@ def _replace_planner(
     planner_name: str,
     *,
     num_proposals: int,
+    proposal_anchors: torch.Tensor | None,
     pc_range: Sequence[float],
 ) -> None:
     if planner_name == "gru":
@@ -351,6 +422,7 @@ def _replace_planner(
             num_heads=8,
             egomotion_dim=256,
             visual_history_dim=896,
+            proposal_anchors=proposal_anchors,
             pc_range=pc_range,
         )
     else:
@@ -812,6 +884,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--precision", choices=("bf16", "fp32"), default="bf16")
     parser.add_argument("--seed", type=int, default=149)
     parser.add_argument("--num-proposals", type=int, default=16)
+    parser.add_argument(
+        "--anchor-mode",
+        choices=("soft", "learned"),
+        default="soft",
+        help=(
+            "soft initializes query proposals from training-trajectory "
+            "medoids with learned residual refinement; learned uses only the "
+            "PAD query bank."
+        ),
+    )
     parser.add_argument("--query-loss-weight", type=float, default=1.0)
     parser.add_argument(
         "--train-limit",
@@ -899,6 +981,16 @@ def main() -> None:
         f"validation={len(validation_dataset)}"
     )
 
+    proposal_anchors = None
+    if args.planner == "query" and args.anchor_mode == "soft":
+        proposal_anchors = _build_anchor_controls(
+            train_dataset,
+            num_proposals=args.num_proposals,
+        )
+        print(
+            f"Built {proposal_anchors.shape[0]} soft trajectory anchors "
+            f"with shape {tuple(proposal_anchors.shape)}"
+        )
     # Data/model setup above does not define the architecture comparison.
     # Reseed before creating the fresh planner so both planner runs begin from
     # the same reproducible initialization stream.
@@ -908,6 +1000,7 @@ def main() -> None:
             model,
             args.planner,
             num_proposals=args.num_proposals,
+            proposal_anchors=proposal_anchors,
             pc_range=pc_range,
         )
         model.Reactive_E2E.TrajectoryPlanner.to(device)
@@ -988,6 +1081,7 @@ def main() -> None:
         "precision": args.precision,
         "seed": args.seed,
         "num_proposals": args.num_proposals,
+        "anchor_mode": args.anchor_mode,
         "query_loss_weight": args.query_loss_weight,
         "checkpoint_architecture": checkpoint_config["model_architecture_version"],
         "trainable_parameter_count": sum(

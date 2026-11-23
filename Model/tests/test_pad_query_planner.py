@@ -153,3 +153,24 @@ def test_repeated_depth_refines_each_round() -> None:
     assert planner.last_proposal_xy is not None
     assert planner.last_proposal_xy.shape == (2, 4, 8, 2)
     assert torch.isfinite(planner.last_proposal_xy).all()
+
+
+def test_soft_anchors_initialize_learnable_proposals() -> None:
+    torch.manual_seed(13)
+    anchors = torch.randn(4, 8, 2) * 1e-3
+    planner = _planner(proposal_anchors=anchors).eval()
+    bev, visual, ego, speed = _inputs()
+    with torch.no_grad():
+        output = planner(
+            bev,
+            visual,
+            ego,
+            initial_speed_mps=speed,
+        )
+    assert output.shape == (2, 16)
+    assert torch.isfinite(output).all()
+    assert planner.anchor_controls is not None
+    assert torch.equal(planner.anchor_controls, anchors)
+    assert planner.anchor_encoder is not None
+    assert planner.last_proposal_controls is not None
+    assert planner.last_proposal_controls.shape == (2, 4, 8, 2)

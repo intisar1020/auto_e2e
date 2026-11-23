@@ -22,6 +22,10 @@ Source design:
   ``traj_refiner.py``, and ``score_module/scorer.py``.
 * Drive-JEPA: the same proposal/refinement structure with additional
   NavSim-specific score calibration and pseudo-target losses.
+
+An optional set of training-trajectory anchors can softly initialize the
+proposal controls and query embeddings. The anchors are not frozen outputs:
+every refinement predicts a residual update from the current BEV.
 """
 
 from __future__ import annotations
@@ -205,12 +209,13 @@ class _ProposalRefinementLayer(nn.Module):
     def forward(
         self,
         queries: torch.Tensor,
+        previous_controls: torch.Tensor,
         bev_features: torch.Tensor,
         initial_speed_mps: torch.Tensor,
         pc_range: Sequence[float],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size, num_proposals, num_steps, _ = queries.shape
-        controls = self.proposal_head(queries)
+        controls = previous_controls + self.proposal_head(queries)
         flat_controls = controls.reshape(
             batch_size * num_proposals,
             num_steps,
@@ -283,6 +288,7 @@ class PadQueryPlanner(BasePlanner):
         dropout: float = 0.1,
         score_temperature_m: float = 1.0,
         diversity_margin_m: float = 0.25,
+        proposal_anchors: torch.Tensor | None = None,
         previous_refinement_weight: float = 0.1,
         diversity_weight: float = 0.1,
         proposal_loss_weight: float = 1.0,
@@ -334,6 +340,24 @@ class PadQueryPlanner(BasePlanner):
             num_proposals * num_timesteps,
             embed_dim,
         )
+        self.anchor_encoder: nn.Linear | None
+        if proposal_anchors is None:
+            self.register_buffer("anchor_controls", None)
+            self.anchor_encoder = None
+        else:
+            if tuple(proposal_anchors.shape) != (
+                num_proposals,
+                num_timesteps,
+                num_signals,
+            ):
+                raise ValueError("proposal_anchors have the wrong shape")
+            if not torch.isfinite(proposal_anchors).all():
+                raise ValueError("proposal_anchors must be finite")
+            self.register_buffer(
+                "anchor_controls",
+                proposal_anchors.to(dtype=torch.float32).clone(),
+            )
+            self.anchor_encoder = nn.Linear(num_signals, embed_dim)
         self.refinement = _ProposalRefinementLayer(
             embed_dim=embed_dim,
             num_points=num_bev_points,
@@ -341,6 +365,9 @@ class PadQueryPlanner(BasePlanner):
             offset_scale=offset_scale,
             dropout=dropout,
         )
+        if proposal_anchors is not None:
+            nn.init.zeros_(self.refinement.proposal_head[-1].weight)
+            nn.init.zeros_(self.refinement.proposal_head[-1].bias)
         self.score_head = _mlp(embed_dim, embed_dim * 2, 1)
 
         self.last_aux_loss: torch.Tensor | None = None
@@ -445,6 +472,28 @@ class PadQueryPlanner(BasePlanner):
             self.num_timesteps,
             self.embed_dim,
         )
+        previous_controls = torch.zeros(
+            batch_size,
+            self.num_proposals,
+            self.num_timesteps,
+            self.num_signals,
+            device=bev_features.device,
+            dtype=bev_features.dtype,
+        )
+        if self.anchor_controls is not None:
+            anchors = self.anchor_controls.to(
+                device=bev_features.device,
+                dtype=bev_features.dtype,
+            )
+            previous_controls = anchors[None].expand(
+                batch_size,
+                -1,
+                -1,
+                -1,
+            )
+            if self.anchor_encoder is None:
+                raise RuntimeError("proposal anchors require an encoder")
+            queries = queries + self.anchor_encoder(anchors)[None]
         initial_speed = initial_speed.to(
             device=bev_features.device,
             dtype=bev_features.dtype,
@@ -455,12 +504,14 @@ class PadQueryPlanner(BasePlanner):
         for _ in range(self.num_refinement_steps):
             queries, controls, xy_m = self.refinement(
                 queries,
+                previous_controls,
                 bev_features,
                 initial_speed,
                 self.pc_range,
             )
             proposal_controls.append(controls)
             proposal_xy.append(xy_m)
+            previous_controls = controls
 
         final_controls = proposal_controls[-1]
         final_xy = proposal_xy[-1]
